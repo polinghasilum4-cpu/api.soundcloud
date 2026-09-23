@@ -1,15 +1,8 @@
 {
-  "name": "sound music",
+  "name": "api-soundcloud-v2",
   "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "build": "echo 'Build complete'",
-    "dev": "vercel dev"
-  },
+  "main": "api/v2/soundcloud.js",
   "dependencies": {
     "axios": "^1.6.0"
-  },
-  "devDependencies": {
-    "vercel": "^latest"
   }
 }
