@@ -1,17 +1,5 @@
 const axios = require("axios");
 
-const API_BASE = "https://api.toolenium.com";
-
-const HEADERS = {
-  accept: "*/*",
-  "content-type": "application/json",
-  origin: "https://scload.com",
-  referer: "https://scload.com/",
-  "user-agent":
-    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
-  "accept-language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-};
-
 module.exports = async (req, res) => {
   // CORS Headers
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -28,16 +16,28 @@ module.exports = async (req, res) => {
     return res.status(400).json({
       status: false,
       message: "Parameter 'url' wajib diisi!",
-      example: "/api/v2/soundcloud?url=https://soundcloud.com/user/track"
+      example: "/api/v2/soundcloud?url=https://soundcloud.com/artist/track-name"
     });
   }
 
   try {
-    const { data } = await axios.post(
-      `${API_BASE}/v1/info`,
-      { url: scUrl },
-      { headers: HEADERS, timeout: 30000 }
-    );
+    const response = await axios({
+      method: "post",
+      url: "https://api.toolenium.com/v1/info",
+      headers: {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "origin": "https://scload.com",
+        "referer": "https://scload.com/",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      },
+      data: {
+        url: scUrl
+      },
+      timeout: 30000
+    });
+
+    const data = response.data;
 
     if (!data || !data.formats || data.formats.length === 0) {
       return res.status(404).json({
@@ -65,7 +65,7 @@ module.exports = async (req, res) => {
     return res.status(500).json({
       status: false,
       message: "Terjadi kesalahan server.",
-      error: error.message
+      error: error.response?.data || error.message
     });
   }
 };
