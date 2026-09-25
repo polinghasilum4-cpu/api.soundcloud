@@ -4,15 +4,16 @@
     "api/v2/faceswap.js": {
       "memory": 1024,
       "maxDuration": 60
-    },
-    "api/v2/upload.js": {
-      "memory": 1024,
-      "maxDuration": 30
     }
   },
   "rewrites": [
-    { "source": "/api/v2/soundcloud", "destination": "/api/v2/soundcloud.js" },
-    { "source": "/api/v2/faceswap", "destination": "/api/v2/faceswap.js" },
-    { "source": "/api/v2/upload", "destination": "/api/v2/upload.js" }
+    {
+      "source": "/api/v2/soundcloud",
+      "destination": "/api/v2/soundcloud.js"
+    },
+    {
+      "source": "/api/v2/faceswap",
+      "destination": "/api/v2/faceswap.js"
+    }
   ]
 }
