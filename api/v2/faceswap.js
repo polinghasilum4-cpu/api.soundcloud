@@ -2,26 +2,17 @@
  * Face Swap API — Remaker.ai
  * 
  * POST /api/v2/faceswap
- * 
- * Mode A (multipart):
- *   Content-Type: multipart/form-data
- *   Fields: source (file), target (file), serial (opsional)
- * 
- * Mode B (JSON):
- *   Content-Type: application/json
- *   Body: { source_url, target_url, serial? }
- * 
- * Response:
- *   { success: true, data: { jobId, outputUrls: [...], elapsedMs } }
  */
 
 const axios = require('axios');
+const https = require('https');
+const { URL } = require('url');
 const { formidable } = require('formidable');
 const fs = require('fs');
 const crypto = require('crypto');
 
 // ============================================================
-//  VERCEL CONFIG — Hobby plan maxDuration = 60s
+//  VERCEL CONFIG
 // ============================================================
 module.exports.config = {
     api: {
@@ -62,7 +53,54 @@ function makeHeaders(serial, extra = {}) {
 }
 
 // ============================================================
-//  UPLOAD GAMBAR VIA OSS PRESIGNED URL
+//  PUT VIA HTTPS MODULE — MINIMAL HEADERS (fix signature)
+// ============================================================
+function putToOss(rawUrl, buffer, contentType = 'image/jpeg') {
+    return new Promise((resolve, reject) => {
+        let u;
+        try {
+            u = new URL(rawUrl);
+        } catch (e) {
+            return reject(new Error(`URL presigned invalid: ${e.message}`));
+        }
+
+        // PENTING: pakai raw path+query persis dari URL asli
+        const reqPath = u.pathname + u.search;
+
+        const req = https.request(
+            {
+                method: 'PUT',
+                hostname: u.hostname,
+                port: u.port || 443,
+                path: reqPath,
+                headers: {
+                    'Content-Type': contentType,
+                    'Content-Length': buffer.length,
+                    // JANGAN tambah User-Agent / Accept / Accept-Encoding
+                    // biar canonical request match sama yang di-sign
+                },
+            },
+            (res) => {
+                let body = '';
+                res.on('data', (c) => (body += c));
+                res.on('end', () =>
+                    resolve({ status: res.statusCode, body, headers: res.headers })
+                );
+            }
+        );
+
+        req.on('error', reject);
+        req.setTimeout(60000, () => {
+            req.destroy(new Error('PUT timeout 60s'));
+        });
+
+        req.write(buffer);
+        req.end();
+    });
+}
+
+// ============================================================
+//  UPLOAD GAMBAR
 // ============================================================
 async function uploadImage(buffer, filename, serial) {
     const size = buffer.length;
@@ -85,33 +123,44 @@ async function uploadImage(buffer, filename, serial) {
     }
 
     const { upload_id, parts, base_url } = initData.result;
+    const putUrl = parts[0].url;
 
-    // ---- 2. PUT ke presigned URL (pakai axios — stabil buat OSS) ----
-    try {
-        const putRes = await axios.put(parts[0].url, buffer, {
-            headers: {
-                'Content-Type': 'image/jpeg',
-                'Content-Length': buffer.length,
-            },
-            maxBodyLength: Infinity,
-            maxContentLength: Infinity,
-            validateStatus: () => true,
-            timeout: 60000,
-            transformRequest: [(data) => data],  // jangan auto-serialize
-        });
+    // ---- 2. PUT ke presigned URL — coba 3 content-type ----
+    const tried = [];
+    const contentTypes = ['image/jpeg', 'application/octet-stream', ''];
 
-        if (putRes.status < 200 || putRes.status >= 300) {
-            const errText = typeof putRes.data === 'string'
-                ? putRes.data
-                : JSON.stringify(putRes.data);
-            throw new Error(`PUT gagal HTTP ${putRes.status}: ${errText.slice(0, 200)}`);
+    let lastErr = null;
+    let succeeded = false;
+
+    for (const ct of contentTypes) {
+        try {
+            const r = await putToOss(putUrl, buffer, ct);
+            tried.push(`CT='${ct || '(none)'}' → ${r.status}`);
+
+            if (r.status >= 200 && r.status < 300) {
+                succeeded = true;
+                break;
+            }
+
+            // Kalau 403, simpan error & coba CT berikutnya
+            if (r.status === 403) {
+                lastErr = `PUT gagal HTTP 403: ${String(r.body).slice(0, 200)}`;
+                continue;
+            }
+
+            // Error lain, langsung lempar
+            throw new Error(`PUT gagal HTTP ${r.status}: ${String(r.body).slice(0, 200)}`);
+        } catch (e) {
+            tried.push(`CT='${ct || '(none)'}' → ERR ${e.message}`);
+            lastErr = e.message;
         }
-    } catch (e) {
-        if (e.message.startsWith('PUT gagal')) throw e;
-        throw new Error(`PUT request error: ${e.message}`);
     }
 
-    // ---- 3. complete-upload (non-critical, fire & forget) ----
+    if (!succeeded) {
+        throw new Error(`${lastErr || 'PUT gagal'} | Tried: ${tried.join(', ')}`);
+    }
+
+    // ---- 3. complete-upload (non-critical) ----
     try {
         await fetch(`${BASE_URL}/api/pai/v5/complete-upload`, {
             method: 'POST',
@@ -195,16 +244,12 @@ async function waitForJob(jobId, serial, maxWaitMs = 50000) {
 //  FULL FLOW
 // ============================================================
 async function faceSwap(sourceBuffer, targetBuffer, serial) {
-    // Upload 2 gambar parallel
     const [sourceUrl, targetUrl] = await Promise.all([
         uploadImage(sourceBuffer, 'source.jpg', serial),
         uploadImage(targetBuffer, 'target.jpg', serial),
     ]);
 
-    // Create job
     const jobId = await createJob(targetUrl, sourceUrl, serial);
-
-    // Polling
     const outputUrls = await waitForJob(jobId, serial);
 
     return { jobId, outputUrls, sourceUrl, targetUrl };
@@ -272,18 +317,16 @@ async function fetchAsBuffer(url) {
 //  HANDLER UTAMA
 // ============================================================
 module.exports = async function handler(req, res) {
-    // ---- CORS headers — SET PERTAMA, sebelum apapun ----
+    // CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Access-Control-Max-Age', '86400');
 
-    // ---- Handle preflight OPTIONS sebelum parsing body ----
     if (req.method === 'OPTIONS') {
         return res.status(204).end();
     }
 
-    // ---- Method check ----
     if (req.method !== 'POST') {
         return res.status(405).json({
             success: false,
@@ -298,7 +341,6 @@ module.exports = async function handler(req, res) {
     try {
         let sourceBuf, targetBuf, customSerial;
 
-        // ---- Mode A: multipart ----
         if (contentType.includes('multipart/form-data')) {
             const { fields, files } = await parseForm(req);
             sourceBuf = getFile(files, 'source');
@@ -311,9 +353,7 @@ module.exports = async function handler(req, res) {
                     error: 'Butuh 2 file: "source" dan "target"',
                 });
             }
-        }
-        // ---- Mode B: JSON ----
-        else if (contentType.includes('application/json')) {
+        } else if (contentType.includes('application/json')) {
             const body = await readJsonBody(req);
             const { source_url, target_url, serial: ser } = body;
 
@@ -329,16 +369,13 @@ module.exports = async function handler(req, res) {
                 fetchAsBuffer(target_url),
             ]);
             customSerial = ser;
-        }
-        // ---- Unknown ----
-        else {
+        } else {
             return res.status(400).json({
                 success: false,
                 error: 'Content-Type harus multipart/form-data atau application/json',
             });
         }
 
-        // ---- Validasi ukuran ----
         if (sourceBuf.length > 15_000_000 || targetBuf.length > 15_000_000) {
             return res.status(400).json({
                 success: false,
@@ -346,7 +383,6 @@ module.exports = async function handler(req, res) {
             });
         }
 
-        // ---- Jalanin face swap ----
         const finalSerial = customSerial || serial;
         const result = await faceSwap(sourceBuf, targetBuf, finalSerial);
 
