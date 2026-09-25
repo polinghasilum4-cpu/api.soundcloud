@@ -16,7 +16,6 @@ const FormData = require('form-data');
 const { Readable } = require('stream');
 const { formidable } = require('formidable');
 const fs = require('fs');
-const crypto = require('crypto');
 
 // ============================================================
 //  VERCEL CONFIG
@@ -34,7 +33,7 @@ module.exports.config = {
 // ============================================================
 const BASE_URL = 'https://api.remaker.ai';
 const PRODUCT_CODE = '067003';
-const PRODUCT_SERIAL = 'd0556055c62201b80a956de9c4ad7d37'; // fixed serial, works
+const PRODUCT_SERIAL = 'd0556055c62201b80a956de9c4ad7d37';
 const MODEL_VERSION = '2';
 
 // ============================================================
@@ -54,12 +53,11 @@ function makeHeaders(extra = {}) {
 }
 
 // ============================================================
-//  CREATE JOB — upload file langsung via multipart
+//  CREATE JOB — upload 2 file via multipart
 // ============================================================
 async function createJob(targetBuffer, swapBuffer) {
     const form = new FormData();
 
-    // Field name PENTING: target_image & swap_image
     form.append('target_image', Readable.from(targetBuffer), {
         filename: 'target.jpg',
         contentType: 'image/jpeg',
@@ -68,7 +66,7 @@ async function createJob(targetBuffer, swapBuffer) {
         filename: 'source.jpg',
         contentType: 'image/jpeg',
     });
-    form.append('version', MODEL_VERSION); // ← WAJIB
+    form.append('version', MODEL_VERSION); // WAJIB
 
     const res = await axios.post(
         `${BASE_URL}/api/pai/v3/ai-facevary/appapi/create-job`,
@@ -97,7 +95,11 @@ async function createJob(targetBuffer, swapBuffer) {
 }
 
 // ============================================================
-//  POLLING
+//  POLLING JOB
+//  - code 100002 / 300006 = masih proses → lanjut polling
+//  - code 100000 + output_image_url → SUKSES
+//  - code 100000 tanpa URL → lanjut polling
+//  - msg 'failed' / 'not found' / 'no face' → fatal
 // ============================================================
 async function waitForJob(jobId, maxWaitMs = 55000) {
     const start = Date.now();
@@ -121,32 +123,41 @@ async function waitForJob(jobId, maxWaitMs = 55000) {
             const urls = result.output_image_url;
             const msg = d.message?.en || '';
 
-            // Sukses
+            // ✅ SUKSES
             if (urls && urls.length > 0) {
                 return urls;
             }
 
-            // Processing — lanjut polling
-            if (d.code === 100002) continue;
+            // ✅ MASIH PROSES — lanjut polling
+            if (
+                d.code === 100002 ||
+                d.code === 300006 ||
+                (d.code === 100000 && !urls)
+            ) {
+                continue;
+            }
 
-            // Code 100000 tanpa URL = masih processing
-            if (d.code === 100000 && !urls) continue;
-
-            // Error dari Remaker (300008, dll)
-            if (msg.includes('failed') ||
+            // ❌ Error fatal
+            if (
+                msg.includes('failed') ||
                 msg.includes('not found') ||
                 msg.includes('no face') ||
-                msg.includes('no human')) {
+                msg.includes('no human')
+            ) {
                 throw new Error(`Job gagal: ${msg}`);
             }
 
-            // Code error lain
-            if (d.code !== 100002 && d.code !== 100000) {
-                throw new Error(`Job error (code ${d.code}): ${msg}`);
-            }
+            // ❌ Code error lain (unexpected)
+            throw new Error(`Job error (code ${d.code}): ${msg}`);
         } catch (e) {
-            if (e.message.startsWith('Job gagal') || e.message.startsWith('Job error')) throw e;
-            // Network hiccup, coba lagi
+            // Fatal error dari atas → lempar ke handler
+            if (
+                e.message.startsWith('Job gagal') ||
+                e.message.startsWith('Job error')
+            ) {
+                throw e;
+            }
+            // Network hiccup — retry diam-diam
         }
     }
 
@@ -211,7 +222,10 @@ function readJsonBody(req) {
 }
 
 async function fetchAsBuffer(url) {
-    const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000 });
+    const res = await axios.get(url, {
+        responseType: 'arraybuffer',
+        timeout: 30000,
+    });
     return Buffer.from(res.data);
 }
 
@@ -240,7 +254,7 @@ module.exports = async function handler(req, res) {
     try {
         let sourceBuf, targetBuf;
 
-        // Mode A: multipart upload
+        // Mode A: multipart
         if (contentType.includes('multipart/form-data')) {
             const { files } = await parseForm(req);
             sourceBuf = getFile(files, 'source');
@@ -253,7 +267,7 @@ module.exports = async function handler(req, res) {
                 });
             }
         }
-        // Mode B: JSON (URL)
+        // Mode B: JSON
         else if (contentType.includes('application/json')) {
             const body = await readJsonBody(req);
             const { source_url, target_url } = body;
@@ -270,6 +284,7 @@ module.exports = async function handler(req, res) {
                 fetchAsBuffer(target_url),
             ]);
         }
+        // Unknown
         else {
             return res.status(400).json({
                 success: false,
@@ -285,7 +300,7 @@ module.exports = async function handler(req, res) {
             });
         }
 
-        // Jalanin face swap
+        // Jalanin
         const result = await faceSwap(sourceBuf, targetBuf);
 
         return res.json({
