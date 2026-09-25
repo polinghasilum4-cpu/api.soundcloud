@@ -1,14 +1,5 @@
 /**
  * Face Swap API — Remaker.ai
- * 
- * POST /api/v2/faceswap
- * 
- * Mode A (multipart):
- *   - source : file  (wajah pengganti)
- *   - target : file  (gambar yang ditiban)
- * 
- * Mode B (JSON):
- *   - { source_url, target_url }
  */
 
 const axios = require('axios');
@@ -17,9 +8,6 @@ const { Readable } = require('stream');
 const { formidable } = require('formidable');
 const fs = require('fs');
 
-// ============================================================
-//  VERCEL CONFIG
-// ============================================================
 module.exports.config = {
     api: {
         bodyParser: false,
@@ -28,17 +16,11 @@ module.exports.config = {
     maxDuration: 60,
 };
 
-// ============================================================
-//  KONSTANTA
-// ============================================================
 const BASE_URL = 'https://api.remaker.ai';
 const PRODUCT_CODE = '067003';
 const PRODUCT_SERIAL = 'd0556055c62201b80a956de9c4ad7d37';
 const MODEL_VERSION = '2';
 
-// ============================================================
-//  HEADERS
-// ============================================================
 function makeHeaders(extra = {}) {
     return {
         'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 ' +
@@ -53,7 +35,31 @@ function makeHeaders(extra = {}) {
 }
 
 // ============================================================
-//  CREATE JOB — upload 2 file via multipart
+//  DOWNLOAD HASIL dari CDN Remaker → base64
+//  (CDN blok akses langsung tanpa Referer, jadi kita fetch dulu)
+// ============================================================
+async function fetchOutputAsDataUrl(url) {
+    try {
+        const res = await axios.get(url, {
+            responseType: 'arraybuffer',
+            timeout: 30000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 ' +
+                              '(KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36',
+                'Referer': 'https://remaker.ai/',
+                'Origin': 'https://remaker.ai',
+            },
+        });
+        const buf = Buffer.from(res.data);
+        const ct = res.headers['content-type'] || 'image/png';
+        return `data:${ct};base64,${buf.toString('base64')}`;
+    } catch (err) {
+        return null; // gagal fetch, biar client fallback ke URL asli
+    }
+}
+
+// ============================================================
+//  CREATE JOB
 // ============================================================
 async function createJob(targetBuffer, swapBuffer) {
     const form = new FormData();
@@ -66,7 +72,7 @@ async function createJob(targetBuffer, swapBuffer) {
         filename: 'source.jpg',
         contentType: 'image/jpeg',
     });
-    form.append('version', MODEL_VERSION); // WAJIB
+    form.append('version', MODEL_VERSION);
 
     const res = await axios.post(
         `${BASE_URL}/api/pai/v3/ai-facevary/appapi/create-job`,
@@ -96,10 +102,6 @@ async function createJob(targetBuffer, swapBuffer) {
 
 // ============================================================
 //  POLLING JOB
-//  - code 100002 / 300006 = masih proses → lanjut polling
-//  - code 100000 + output_image_url → SUKSES
-//  - code 100000 tanpa URL → lanjut polling
-//  - msg 'failed' / 'not found' / 'no face' → fatal
 // ============================================================
 async function waitForJob(jobId, maxWaitMs = 55000) {
     const start = Date.now();
@@ -112,10 +114,7 @@ async function waitForJob(jobId, maxWaitMs = 55000) {
         try {
             const res = await axios.get(
                 `${BASE_URL}/api/pai/v3/ai-facevary/appapi/get-job/${jobId}`,
-                {
-                    headers: makeHeaders(),
-                    timeout: 30000,
-                }
+                { headers: makeHeaders(), timeout: 30000 }
             );
 
             const d = res.data;
@@ -123,12 +122,8 @@ async function waitForJob(jobId, maxWaitMs = 55000) {
             const urls = result.output_image_url;
             const msg = d.message?.en || '';
 
-            // ✅ SUKSES
-            if (urls && urls.length > 0) {
-                return urls;
-            }
+            if (urls && urls.length > 0) return urls;
 
-            // ✅ MASIH PROSES — lanjut polling
             if (
                 d.code === 100002 ||
                 d.code === 300006 ||
@@ -137,7 +132,6 @@ async function waitForJob(jobId, maxWaitMs = 55000) {
                 continue;
             }
 
-            // ❌ Error fatal
             if (
                 msg.includes('failed') ||
                 msg.includes('not found') ||
@@ -147,17 +141,14 @@ async function waitForJob(jobId, maxWaitMs = 55000) {
                 throw new Error(`Job gagal: ${msg}`);
             }
 
-            // ❌ Code error lain (unexpected)
             throw new Error(`Job error (code ${d.code}): ${msg}`);
         } catch (e) {
-            // Fatal error dari atas → lempar ke handler
             if (
                 e.message.startsWith('Job gagal') ||
                 e.message.startsWith('Job error')
             ) {
                 throw e;
             }
-            // Network hiccup — retry diam-diam
         }
     }
 
@@ -168,10 +159,13 @@ async function waitForJob(jobId, maxWaitMs = 55000) {
 //  FULL FLOW
 // ============================================================
 async function faceSwap(sourceBuffer, targetBuffer) {
-    // source = wajah pengganti, target = gambar dasar
     const { jobId, targetUrl, swapUrl } = await createJob(targetBuffer, sourceBuffer);
     const outputUrls = await waitForJob(jobId);
-    return { jobId, outputUrls, targetUrl, swapUrl };
+
+    // 🔥 Fetch hasilnya jadi base64 biar browser bisa liat
+    const outputDataUrl = await fetchOutputAsDataUrl(outputUrls[0]);
+
+    return { jobId, outputUrls, outputDataUrl, targetUrl, swapUrl };
 }
 
 // ============================================================
@@ -233,7 +227,6 @@ async function fetchAsBuffer(url) {
 //  HANDLER UTAMA
 // ============================================================
 module.exports = async function handler(req, res) {
-    // CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -254,7 +247,6 @@ module.exports = async function handler(req, res) {
     try {
         let sourceBuf, targetBuf;
 
-        // Mode A: multipart
         if (contentType.includes('multipart/form-data')) {
             const { files } = await parseForm(req);
             sourceBuf = getFile(files, 'source');
@@ -266,9 +258,7 @@ module.exports = async function handler(req, res) {
                     error: 'Butuh 2 file: "source" dan "target"',
                 });
             }
-        }
-        // Mode B: JSON
-        else if (contentType.includes('application/json')) {
+        } else if (contentType.includes('application/json')) {
             const body = await readJsonBody(req);
             const { source_url, target_url } = body;
 
@@ -283,16 +273,13 @@ module.exports = async function handler(req, res) {
                 fetchAsBuffer(source_url),
                 fetchAsBuffer(target_url),
             ]);
-        }
-        // Unknown
-        else {
+        } else {
             return res.status(400).json({
                 success: false,
                 error: 'Content-Type harus multipart/form-data atau application/json',
             });
         }
 
-        // Validasi ukuran
         if (sourceBuf.length > 15_000_000 || targetBuf.length > 15_000_000) {
             return res.status(400).json({
                 success: false,
@@ -300,7 +287,6 @@ module.exports = async function handler(req, res) {
             });
         }
 
-        // Jalanin
         const result = await faceSwap(sourceBuf, targetBuf);
 
         return res.json({
@@ -308,6 +294,7 @@ module.exports = async function handler(req, res) {
             data: {
                 jobId: result.jobId,
                 outputUrls: result.outputUrls,
+                outputDataUrl: result.outputDataUrl, // 🔥 base64 buat preview
                 targetUrl: result.targetUrl,
                 swapUrl: result.swapUrl,
                 elapsedMs: Date.now() - startedAt,
