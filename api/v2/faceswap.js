@@ -2,11 +2,18 @@
  * Face Swap API — Remaker.ai
  * 
  * POST /api/v2/faceswap
+ * 
+ * Mode A (multipart):
+ *   - source : file  (wajah pengganti)
+ *   - target : file  (gambar yang ditiban)
+ * 
+ * Mode B (JSON):
+ *   - { source_url, target_url }
  */
 
 const axios = require('axios');
-const https = require('https');
-const { URL } = require('url');
+const FormData = require('form-data');
+const { Readable } = require('stream');
 const { formidable } = require('formidable');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -27,232 +34,133 @@ module.exports.config = {
 // ============================================================
 const BASE_URL = 'https://api.remaker.ai';
 const PRODUCT_CODE = '067003';
-const USER_AGENT = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 ' +
-                   '(KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36';
+const PRODUCT_SERIAL = 'd0556055c62201b80a956de9c4ad7d37'; // fixed serial, works
+const MODEL_VERSION = '2';
 
 // ============================================================
-//  HELPER
+//  HEADERS
 // ============================================================
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function makeHeaders(serial, extra = {}) {
+function makeHeaders(extra = {}) {
     return {
-        'sec-ch-ua-platform': '"Android"',
-        'user-agent': USER_AGENT,
-        'sec-ch-ua': '"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
-        'sec-ch-ua-mobile': '?1',
-        'accept': '*/*',
+        'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 ' +
+                      '(KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36',
         'origin': 'https://remaker.ai',
         'referer': 'https://remaker.ai/',
-        'source': 'ai_face_vary',
         'product-code': PRODUCT_CODE,
-        'product-serial': serial,
+        'product-serial': PRODUCT_SERIAL,
         'authorization': '',
         ...extra,
     };
 }
 
 // ============================================================
-//  PUT VIA HTTPS MODULE — MINIMAL HEADERS (fix signature)
+//  CREATE JOB — upload file langsung via multipart
 // ============================================================
-function putToOss(rawUrl, buffer, contentType = 'image/jpeg') {
-    return new Promise((resolve, reject) => {
-        let u;
-        try {
-            u = new URL(rawUrl);
-        } catch (e) {
-            return reject(new Error(`URL presigned invalid: ${e.message}`));
-        }
+async function createJob(targetBuffer, swapBuffer) {
+    const form = new FormData();
 
-        // PENTING: pakai raw path+query persis dari URL asli
-        const reqPath = u.pathname + u.search;
+    // Field name PENTING: target_image & swap_image
+    form.append('target_image', Readable.from(targetBuffer), {
+        filename: 'target.jpg',
+        contentType: 'image/jpeg',
+    });
+    form.append('swap_image', Readable.from(swapBuffer), {
+        filename: 'source.jpg',
+        contentType: 'image/jpeg',
+    });
+    form.append('version', MODEL_VERSION); // ← WAJIB
 
-        const req = https.request(
-            {
-                method: 'PUT',
-                hostname: u.hostname,
-                port: u.port || 443,
-                path: reqPath,
-                headers: {
-                    'Content-Type': contentType,
-                    'Content-Length': buffer.length,
-                    // JANGAN tambah User-Agent / Accept / Accept-Encoding
-                    // biar canonical request match sama yang di-sign
-                },
+    const res = await axios.post(
+        `${BASE_URL}/api/pai/v3/ai-facevary/appapi/create-job`,
+        form,
+        {
+            headers: {
+                ...form.getHeaders(),
+                ...makeHeaders(),
             },
-            (res) => {
-                let body = '';
-                res.on('data', (c) => (body += c));
-                res.on('end', () =>
-                    resolve({ status: res.statusCode, body, headers: res.headers })
-                );
-            }
-        );
-
-        req.on('error', reject);
-        req.setTimeout(60000, () => {
-            req.destroy(new Error('PUT timeout 60s'));
-        });
-
-        req.write(buffer);
-        req.end();
-    });
-}
-
-// ============================================================
-//  UPLOAD GAMBAR
-// ============================================================
-async function uploadImage(buffer, filename, serial) {
-    const size = buffer.length;
-
-    // ---- 1. init-upload ----
-    const initRes = await fetch(`${BASE_URL}/api/pai/v5/init-upload`, {
-        method: 'POST',
-        headers: makeHeaders(serial, {
-            'content-type': 'application/x-www-form-urlencoded',
-        }),
-        body: new URLSearchParams({
-            file_name: filename,
-            file_size: String(size),
-            part_size: '5242880',
-        }).toString(),
-    });
-    const initData = await initRes.json();
-    if (initData.code !== 100000 || !initData.result) {
-        throw new Error(`init-upload gagal: ${JSON.stringify(initData).slice(0, 150)}`);
-    }
-
-    const { upload_id, parts, base_url } = initData.result;
-    const putUrl = parts[0].url;
-
-    // ---- 2. PUT ke presigned URL — coba 3 content-type ----
-    const tried = [];
-    const contentTypes = ['image/jpeg', 'application/octet-stream', ''];
-
-    let lastErr = null;
-    let succeeded = false;
-
-    for (const ct of contentTypes) {
-        try {
-            const r = await putToOss(putUrl, buffer, ct);
-            tried.push(`CT='${ct || '(none)'}' → ${r.status}`);
-
-            if (r.status >= 200 && r.status < 300) {
-                succeeded = true;
-                break;
-            }
-
-            // Kalau 403, simpan error & coba CT berikutnya
-            if (r.status === 403) {
-                lastErr = `PUT gagal HTTP 403: ${String(r.body).slice(0, 200)}`;
-                continue;
-            }
-
-            // Error lain, langsung lempar
-            throw new Error(`PUT gagal HTTP ${r.status}: ${String(r.body).slice(0, 200)}`);
-        } catch (e) {
-            tried.push(`CT='${ct || '(none)'}' → ERR ${e.message}`);
-            lastErr = e.message;
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+            timeout: 60000,
         }
-    }
+    );
 
-    if (!succeeded) {
-        throw new Error(`${lastErr || 'PUT gagal'} | Tried: ${tried.join(', ')}`);
-    }
-
-    // ---- 3. complete-upload (non-critical) ----
-    try {
-        await fetch(`${BASE_URL}/api/pai/v5/complete-upload`, {
-            method: 'POST',
-            headers: makeHeaders(serial, {
-                'content-type': 'application/x-www-form-urlencoded',
-            }),
-            body: new URLSearchParams({
-                upload_id,
-                product_code: PRODUCT_CODE,
-            }).toString(),
-        });
-    } catch (_) {}
-
-    return base_url;
-}
-
-// ============================================================
-//  CREATE JOB
-// ============================================================
-async function createJob(targetUrl, swapUrl, serial) {
-    const res = await fetch(`${BASE_URL}/api/pai/v3/ai-facevary/appapi/create-job`, {
-        method: 'POST',
-        headers: makeHeaders(serial, { 'content-type': 'application/json' }),
-        body: JSON.stringify({
-            target_image: targetUrl,
-            swap_image: swapUrl,
-            product_code: PRODUCT_CODE,
-        }),
-    });
-    const data = await res.json();
+    const data = res.data;
     if (data.code !== 100000 || !data.result?.job_id) {
-        throw new Error(`create-job gagal: ${JSON.stringify(data).slice(0, 200)}`);
+        throw new Error(`create-job gagal: ${JSON.stringify(data).slice(0, 250)}`);
     }
-    return data.result.job_id;
+
+    return {
+        jobId: data.result.job_id,
+        targetUrl: data.result.target_image,
+        swapUrl: data.result.swap_image,
+    };
 }
 
 // ============================================================
-//  POLLING JOB
+//  POLLING
 // ============================================================
-async function waitForJob(jobId, serial, maxWaitMs = 50000) {
+async function waitForJob(jobId, maxWaitMs = 55000) {
     const start = Date.now();
     let attempt = 0;
-    let errCount = 0;
 
     while (Date.now() - start < maxWaitMs) {
-        await sleep(3000);
+        await new Promise(r => setTimeout(r, 4000));
         attempt++;
 
         try {
-            const res = await fetch(
+            const res = await axios.get(
                 `${BASE_URL}/api/pai/v3/ai-facevary/appapi/get-job/${jobId}`,
-                { method: 'GET', headers: makeHeaders(serial) }
+                {
+                    headers: makeHeaders(),
+                    timeout: 30000,
+                }
             );
-            const data = await res.json();
-            const urls = data.result?.output_image_url;
-            const msg = data.message?.en || '';
 
-            if (urls && urls.length > 0) return urls;
-            errCount = 0;
+            const d = res.data;
+            const result = d.result || {};
+            const urls = result.output_image_url;
+            const msg = d.message?.en || '';
 
-            if (
+            // Sukses
+            if (urls && urls.length > 0) {
+                return urls;
+            }
+
+            // Processing — lanjut polling
+            if (d.code === 100002) continue;
+
+            // Code 100000 tanpa URL = masih processing
+            if (d.code === 100000 && !urls) continue;
+
+            // Error dari Remaker (300008, dll)
+            if (msg.includes('failed') ||
                 msg.includes('not found') ||
-                msg.includes('failed') ||
                 msg.includes('no face') ||
-                msg.includes('no human')
-            ) {
+                msg.includes('no human')) {
                 throw new Error(`Job gagal: ${msg}`);
             }
-        } catch (e) {
-            if (e.message.startsWith('Job gagal')) throw e;
-            errCount++;
-            if (errCount >= 5) {
-                throw new Error(`Network error ${errCount}x: ${e.message}`);
+
+            // Code error lain
+            if (d.code !== 100002 && d.code !== 100000) {
+                throw new Error(`Job error (code ${d.code}): ${msg}`);
             }
+        } catch (e) {
+            if (e.message.startsWith('Job gagal') || e.message.startsWith('Job error')) throw e;
+            // Network hiccup, coba lagi
         }
     }
+
     throw new Error(`Timeout ${maxWaitMs}ms nunggu job ${jobId}`);
 }
 
 // ============================================================
 //  FULL FLOW
 // ============================================================
-async function faceSwap(sourceBuffer, targetBuffer, serial) {
-    const [sourceUrl, targetUrl] = await Promise.all([
-        uploadImage(sourceBuffer, 'source.jpg', serial),
-        uploadImage(targetBuffer, 'target.jpg', serial),
-    ]);
-
-    const jobId = await createJob(targetUrl, sourceUrl, serial);
-    const outputUrls = await waitForJob(jobId, serial);
-
-    return { jobId, outputUrls, sourceUrl, targetUrl };
+async function faceSwap(sourceBuffer, targetBuffer) {
+    // source = wajah pengganti, target = gambar dasar
+    const { jobId, targetUrl, swapUrl } = await createJob(targetBuffer, sourceBuffer);
+    const outputUrls = await waitForJob(jobId);
+    return { jobId, outputUrls, targetUrl, swapUrl };
 }
 
 // ============================================================
@@ -281,11 +189,6 @@ function getFile(files, key) {
     return fs.readFileSync(file.filepath);
 }
 
-function getField(fields, key) {
-    const v = fields[key];
-    return Array.isArray(v) ? v[0] : v;
-}
-
 function readJsonBody(req) {
     return new Promise((resolve, reject) => {
         let data = '';
@@ -308,24 +211,21 @@ function readJsonBody(req) {
 }
 
 async function fetchAsBuffer(url) {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Gagal download: HTTP ${res.status}`);
-    return Buffer.from(await res.arrayBuffer());
+    const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000 });
+    return Buffer.from(res.data);
 }
 
 // ============================================================
 //  HANDLER UTAMA
 // ============================================================
 module.exports = async function handler(req, res) {
-    // CORS headers
+    // CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Access-Control-Max-Age', '86400');
 
-    if (req.method === 'OPTIONS') {
-        return res.status(204).end();
-    }
+    if (req.method === 'OPTIONS') return res.status(204).end();
 
     if (req.method !== 'POST') {
         return res.status(405).json({
@@ -335,17 +235,16 @@ module.exports = async function handler(req, res) {
     }
 
     const contentType = req.headers['content-type'] || '';
-    const serial = crypto.randomBytes(16).toString('hex');
     const startedAt = Date.now();
 
     try {
-        let sourceBuf, targetBuf, customSerial;
+        let sourceBuf, targetBuf;
 
+        // Mode A: multipart upload
         if (contentType.includes('multipart/form-data')) {
-            const { fields, files } = await parseForm(req);
+            const { files } = await parseForm(req);
             sourceBuf = getFile(files, 'source');
             targetBuf = getFile(files, 'target');
-            customSerial = getField(fields, 'serial');
 
             if (!sourceBuf || !targetBuf) {
                 return res.status(400).json({
@@ -353,9 +252,11 @@ module.exports = async function handler(req, res) {
                     error: 'Butuh 2 file: "source" dan "target"',
                 });
             }
-        } else if (contentType.includes('application/json')) {
+        }
+        // Mode B: JSON (URL)
+        else if (contentType.includes('application/json')) {
             const body = await readJsonBody(req);
-            const { source_url, target_url, serial: ser } = body;
+            const { source_url, target_url } = body;
 
             if (!source_url || !target_url) {
                 return res.status(400).json({
@@ -368,14 +269,15 @@ module.exports = async function handler(req, res) {
                 fetchAsBuffer(source_url),
                 fetchAsBuffer(target_url),
             ]);
-            customSerial = ser;
-        } else {
+        }
+        else {
             return res.status(400).json({
                 success: false,
                 error: 'Content-Type harus multipart/form-data atau application/json',
             });
         }
 
+        // Validasi ukuran
         if (sourceBuf.length > 15_000_000 || targetBuf.length > 15_000_000) {
             return res.status(400).json({
                 success: false,
@@ -383,17 +285,16 @@ module.exports = async function handler(req, res) {
             });
         }
 
-        const finalSerial = customSerial || serial;
-        const result = await faceSwap(sourceBuf, targetBuf, finalSerial);
+        // Jalanin face swap
+        const result = await faceSwap(sourceBuf, targetBuf);
 
         return res.json({
             success: true,
             data: {
                 jobId: result.jobId,
                 outputUrls: result.outputUrls,
-                sourceUrl: result.sourceUrl,
                 targetUrl: result.targetUrl,
-                serial: finalSerial,
+                swapUrl: result.swapUrl,
                 elapsedMs: Date.now() - startedAt,
             },
         });
