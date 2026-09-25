@@ -15,6 +15,7 @@
  *   { success: true, data: { jobId, outputUrls: [...], elapsedMs } }
  */
 
+const axios = require('axios');
 const { formidable } = require('formidable');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -60,11 +61,13 @@ function makeHeaders(serial, extra = {}) {
     };
 }
 
-// Upload gambar via OSS presigned URL
+// ============================================================
+//  UPLOAD GAMBAR VIA OSS PRESIGNED URL
+// ============================================================
 async function uploadImage(buffer, filename, serial) {
     const size = buffer.length;
 
-    // 1. init-upload
+    // ---- 1. init-upload ----
     const initRes = await fetch(`${BASE_URL}/api/pai/v5/init-upload`, {
         method: 'POST',
         headers: makeHeaders(serial, {
@@ -83,17 +86,32 @@ async function uploadImage(buffer, filename, serial) {
 
     const { upload_id, parts, base_url } = initData.result;
 
-    // 2. PUT ke presigned URL
-    const putRes = await fetch(parts[0].url, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'image/jpeg' },
-        body: buffer,
-    });
-    if (!putRes.ok) {
-        throw new Error(`PUT upload gagal: HTTP ${putRes.status}`);
+    // ---- 2. PUT ke presigned URL (pakai axios — stabil buat OSS) ----
+    try {
+        const putRes = await axios.put(parts[0].url, buffer, {
+            headers: {
+                'Content-Type': 'image/jpeg',
+                'Content-Length': buffer.length,
+            },
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+            validateStatus: () => true,
+            timeout: 60000,
+            transformRequest: [(data) => data],  // jangan auto-serialize
+        });
+
+        if (putRes.status < 200 || putRes.status >= 300) {
+            const errText = typeof putRes.data === 'string'
+                ? putRes.data
+                : JSON.stringify(putRes.data);
+            throw new Error(`PUT gagal HTTP ${putRes.status}: ${errText.slice(0, 200)}`);
+        }
+    } catch (e) {
+        if (e.message.startsWith('PUT gagal')) throw e;
+        throw new Error(`PUT request error: ${e.message}`);
     }
 
-    // 3. complete-upload (non-critical, fire & forget)
+    // ---- 3. complete-upload (non-critical, fire & forget) ----
     try {
         await fetch(`${BASE_URL}/api/pai/v5/complete-upload`, {
             method: 'POST',
@@ -110,7 +128,9 @@ async function uploadImage(buffer, filename, serial) {
     return base_url;
 }
 
-// Create job
+// ============================================================
+//  CREATE JOB
+// ============================================================
 async function createJob(targetUrl, swapUrl, serial) {
     const res = await fetch(`${BASE_URL}/api/pai/v3/ai-facevary/appapi/create-job`, {
         method: 'POST',
@@ -128,7 +148,9 @@ async function createJob(targetUrl, swapUrl, serial) {
     return data.result.job_id;
 }
 
-// Polling job
+// ============================================================
+//  POLLING JOB
+// ============================================================
 async function waitForJob(jobId, serial, maxWaitMs = 50000) {
     const start = Date.now();
     let attempt = 0;
@@ -169,7 +191,9 @@ async function waitForJob(jobId, serial, maxWaitMs = 50000) {
     throw new Error(`Timeout ${maxWaitMs}ms nunggu job ${jobId}`);
 }
 
-// FULL FLOW
+// ============================================================
+//  FULL FLOW
+// ============================================================
 async function faceSwap(sourceBuffer, targetBuffer, serial) {
     // Upload 2 gambar parallel
     const [sourceUrl, targetUrl] = await Promise.all([
