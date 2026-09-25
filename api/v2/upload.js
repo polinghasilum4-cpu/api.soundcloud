@@ -19,7 +19,6 @@ module.exports.config = {
 
 const CATBOX_URL = 'https://catbox.moe/user/api.php';
 const LITTERBOX_URL = 'https://litterbox.catbox.moe/resources/internals/api.php';
-
 const VALID_TIMES = ['1h', '12h', '24h', '72h'];
 
 module.exports = async function handler(req, res) {
@@ -27,20 +26,17 @@ module.exports = async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Access-Control-Max-Age', '86400');
-
     if (req.method === 'OPTIONS') return res.status(204).end();
 
-    // GET = info
     if (req.method === 'GET') {
         return res.json({
             success: true,
             info: 'Upload API — Catbox / Litterbox',
             modes: {
-                permanent: 'POST /api/v2/upload (default) — file permanen',
-                temporary: 'POST /api/v2/upload?type=temp&time=24h — auto-expired',
+                permanent: 'POST /api/v2/upload',
+                temporary: 'POST /api/v2/upload?type=temp&time=24h',
             },
             validTimes: VALID_TIMES,
-            maxSize: '50 MB',
         });
     }
 
@@ -53,18 +49,15 @@ module.exports = async function handler(req, res) {
     try {
         const query = req.query || {};
         const type = (query.type || 'permanent').toLowerCase();
-        let time = (query.time || '24h').toLowerCase();
+        const time = (query.time || '24h').toLowerCase();
 
-        if (type === 'temp' || type === 'temporary') {
-            if (!VALID_TIMES.includes(time)) {
-                return res.status(400).json({
-                    success: false,
-                    error: `time invalid. Pilih: ${VALID_TIMES.join(', ')}`,
-                });
-            }
+        if ((type === 'temp' || type === 'temporary') && !VALID_TIMES.includes(time)) {
+            return res.status(400).json({
+                success: false,
+                error: `time invalid. Pilih: ${VALID_TIMES.join(', ')}`,
+            });
         }
 
-        // Parse file
         const form = formidable({
             maxFileSize: 50 * 1024 * 1024,
             multiples: false,
@@ -80,9 +73,8 @@ module.exports = async function handler(req, res) {
         const candidates = ['file', 'image', 'upload', 'photo', 'media'];
         let file = null;
         for (const name of candidates) {
-            const f = files[name];
-            if (f) {
-                file = Array.isArray(f) ? f[0] : f;
+            if (files[name]) {
+                file = Array.isArray(files[name]) ? files[name][0] : files[name];
                 break;
             }
         }
@@ -98,11 +90,14 @@ module.exports = async function handler(req, res) {
         const filename = file.originalFilename || 'upload.jpg';
         const mimetype = file.mimetype || 'image/jpeg';
 
-        console.log(`[upload] ${filename} (${(buffer.length / 1024).toFixed(1)} KB) type=${type}`);
-
         const isTemp = (type === 'temp' || type === 'temporary');
         const uploadUrl = isTemp ? LITTERBOX_URL : CATBOX_URL;
 
+        console.log(`[upload] ${filename} (${(buffer.length / 1024).toFixed(1)} KB) ${isTemp ? 'temp:' + time : 'permanent'}`);
+
+        // ============================================================
+        //  FORWARD KE CATBOX — pakai header persis kayak browser
+        // ============================================================
         const catboxForm = new FormData();
         catboxForm.append('reqtype', 'fileupload');
         if (isTemp) {
@@ -115,32 +110,54 @@ module.exports = async function handler(req, res) {
             contentType: mimetype,
         });
 
+        const catboxHeaders = {
+            ...catboxForm.getHeaders(),
+            // Browser fingerprint — WAJIB biar gak 412
+            'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 ' +
+                          '(KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36',
+            'accept': 'application/json, text/plain, */*',
+            'accept-language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+            'accept-encoding': 'gzip, deflate, br',
+            'cache-control': 'no-cache',
+            'x-requested-with': 'XMLHttpRequest',
+            'origin': isTemp ? 'https://litterbox.catbox.moe' : 'https://catbox.moe',
+            'referer': isTemp ? 'https://litterbox.catbox.moe/' : 'https://catbox.moe/',
+            'sec-ch-ua': '"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
+            'sec-ch-ua-mobile': '?1',
+            'sec-ch-ua-platform': '"Android"',
+            'sec-fetch-site': 'same-origin',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-dest': 'empty',
+            'priority': 'u=1, i',
+            'connection': 'keep-alive',
+        };
+
         const catboxRes = await axios.post(uploadUrl, catboxForm, {
-            headers: {
-                ...catboxForm.getHeaders(),
-                'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 ' +
-                              '(KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36',
-                'origin': isTemp ? 'https://litterbox.catbox.moe' : 'https://catbox.moe',
-                'referer': isTemp ? 'https://litterbox.catbox.moe/' : 'https://catbox.moe/',
-                'accept': '*/*',
-            },
+            headers: catboxHeaders,
             maxBodyLength: Infinity,
             maxContentLength: Infinity,
             timeout: 60000,
+            decompress: true,
+            validateStatus: () => true, // handle manual
         });
+
+        console.log(`[upload] Catbox status: ${catboxRes.status}`);
+        console.log(`[upload] Catbox body: ${String(catboxRes.data).substring(0, 200)}`);
+
+        if (catboxRes.status !== 200) {
+            throw new Error(`Catbox HTTP ${catboxRes.status}: ${String(catboxRes.data).substring(0, 200)}`);
+        }
 
         const url = String(catboxRes.data).trim();
         if (!url.startsWith('http')) {
-            throw new Error('Response invalid: ' + url.slice(0, 200));
+            throw new Error('Catbox response invalid: ' + url.substring(0, 200));
         }
 
         let expiresAt = null;
         if (isTemp) {
             const map = { '1h': 3600e3, '12h': 12 * 3600e3, '24h': 24 * 3600e3, '72h': 72 * 3600e3 };
-            expiresAt = Date.now() + (map[time] || 24 * 3600e3);
+            expiresAt = Date.now() + map[time];
         }
-
-        console.log(`[upload] ✅ ${url}`);
 
         return res.json({
             success: true,
