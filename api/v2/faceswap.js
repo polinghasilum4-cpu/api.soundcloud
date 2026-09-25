@@ -1,35 +1,33 @@
 /**
  * Face Swap API — Remaker.ai
  * 
- * Endpoint: POST /api/v2/faceswap
+ * POST /api/v2/faceswap
  * 
- * Support 2 mode (auto-detect):
+ * Mode A (multipart):
+ *   Content-Type: multipart/form-data
+ *   Fields: source (file), target (file), serial (opsional)
  * 
- *   A) Multipart — upload file
- *      Content-Type: multipart/form-data
- *      Fields: source (file), target (file), serial (opsional)
- * 
- *   B) JSON — pakai URL gambar
- *      Content-Type: application/json
- *      Body: { source_url, target_url, serial? }
+ * Mode B (JSON):
+ *   Content-Type: application/json
+ *   Body: { source_url, target_url, serial? }
  * 
  * Response:
- *   { success: true, data: { jobId, outputUrls: [...] } }
+ *   { success: true, data: { jobId, outputUrls: [...], elapsedMs } }
  */
 
-import formidable from 'formidable';
-import fs from 'fs';
-import crypto from 'crypto';
+const formidable = require('formidable');
+const fs = require('fs');
+const crypto = require('crypto');
 
 // ============================================================
-//  VERCEL CONFIG
+//  VERCEL CONFIG — Hobby plan maxDuration = 60s
 // ============================================================
-export const config = {
+module.exports.config = {
     api: {
-        bodyParser: false,       // kita handle sendiri
+        bodyParser: false,
         sizeLimit: '25mb',
     },
-    maxDuration: 300,            // 5 menit
+    maxDuration: 60,
 };
 
 // ============================================================
@@ -95,7 +93,7 @@ async function uploadImage(buffer, filename, serial) {
         throw new Error(`PUT upload gagal: HTTP ${putRes.status}`);
     }
 
-    // 3. complete-upload (non-critical)
+    // 3. complete-upload (non-critical, fire & forget)
     try {
         await fetch(`${BASE_URL}/api/pai/v5/complete-upload`, {
             method: 'POST',
@@ -131,7 +129,7 @@ async function createJob(targetUrl, swapUrl, serial) {
 }
 
 // Polling job
-async function waitForJob(jobId, serial, maxWaitMs = 240000) {
+async function waitForJob(jobId, serial, maxWaitMs = 50000) {
     const start = Date.now();
     let attempt = 0;
     let errCount = 0;
@@ -152,7 +150,6 @@ async function waitForJob(jobId, serial, maxWaitMs = 240000) {
             if (urls && urls.length > 0) return urls;
             errCount = 0;
 
-            // Error fatal
             if (
                 msg.includes('not found') ||
                 msg.includes('failed') ||
@@ -164,7 +161,9 @@ async function waitForJob(jobId, serial, maxWaitMs = 240000) {
         } catch (e) {
             if (e.message.startsWith('Job gagal')) throw e;
             errCount++;
-            if (errCount >= 5) throw new Error(`Network error ${errCount}x: ${e.message}`);
+            if (errCount >= 5) {
+                throw new Error(`Network error ${errCount}x: ${e.message}`);
+            }
         }
     }
     throw new Error(`Timeout ${maxWaitMs}ms nunggu job ${jobId}`);
@@ -187,7 +186,9 @@ async function faceSwap(sourceBuffer, targetBuffer, serial) {
     return { jobId, outputUrls, sourceUrl, targetUrl };
 }
 
-// Parse multipart
+// ============================================================
+//  PARSING HELPERS
+// ============================================================
 function parseForm(req) {
     return new Promise((resolve, reject) => {
         const form = formidable({
@@ -216,7 +217,6 @@ function getField(fields, key) {
     return Array.isArray(v) ? v[0] : v;
 }
 
-// Read JSON body manually (karena bodyParser: false)
 function readJsonBody(req) {
     return new Promise((resolve, reject) => {
         let data = '';
@@ -238,7 +238,6 @@ function readJsonBody(req) {
     });
 }
 
-// Download dari URL
 async function fetchAsBuffer(url) {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Gagal download: HTTP ${res.status}`);
@@ -246,16 +245,21 @@ async function fetchAsBuffer(url) {
 }
 
 // ============================================================
-//  HANDLER
+//  HANDLER UTAMA
 // ============================================================
-export default async function handler(req, res) {
-    // CORS
+module.exports = async function handler(req, res) {
+    // ---- CORS headers — SET PERTAMA, sebelum apapun ----
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Max-Age', '86400');
 
-    if (req.method === 'OPTIONS') return res.status(200).end();
+    // ---- Handle preflight OPTIONS sebelum parsing body ----
+    if (req.method === 'OPTIONS') {
+        return res.status(204).end();
+    }
 
+    // ---- Method check ----
     if (req.method !== 'POST') {
         return res.status(405).json({
             success: false,
@@ -270,7 +274,7 @@ export default async function handler(req, res) {
     try {
         let sourceBuf, targetBuf, customSerial;
 
-        // Mode A: multipart (upload file)
+        // ---- Mode A: multipart ----
         if (contentType.includes('multipart/form-data')) {
             const { fields, files } = await parseForm(req);
             sourceBuf = getFile(files, 'source');
@@ -284,7 +288,7 @@ export default async function handler(req, res) {
                 });
             }
         }
-        // Mode B: JSON (URL gambar)
+        // ---- Mode B: JSON ----
         else if (contentType.includes('application/json')) {
             const body = await readJsonBody(req);
             const { source_url, target_url, serial: ser } = body;
@@ -302,7 +306,7 @@ export default async function handler(req, res) {
             ]);
             customSerial = ser;
         }
-        // Mode tidak dikenal
+        // ---- Unknown ----
         else {
             return res.status(400).json({
                 success: false,
@@ -310,7 +314,7 @@ export default async function handler(req, res) {
             });
         }
 
-        // Validasi ukuran
+        // ---- Validasi ukuran ----
         if (sourceBuf.length > 15_000_000 || targetBuf.length > 15_000_000) {
             return res.status(400).json({
                 success: false,
@@ -318,7 +322,7 @@ export default async function handler(req, res) {
             });
         }
 
-        // Jalanin face swap
+        // ---- Jalanin face swap ----
         const finalSerial = customSerial || serial;
         const result = await faceSwap(sourceBuf, targetBuf, finalSerial);
 
@@ -341,4 +345,4 @@ export default async function handler(req, res) {
             elapsedMs: Date.now() - startedAt,
         });
     }
-}
+};
