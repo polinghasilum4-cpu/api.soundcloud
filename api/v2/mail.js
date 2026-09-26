@@ -1,31 +1,39 @@
 /**
- * mail.tm — Temp Mail Client
- * Node.js 18+ / Browser (modern)
+ * Temp Mail API — proxy ke mail.tm
  * 
- * Run: node test-mailtm.js
+ * POST /api/v2/mail
+ * Content-Type: application/json
+ * 
+ * Body:
+ *   { action: 'create' }                              → bikin akun baru
+ *   { action: 'me',     token: '<jwt>' }              → info user
+ *   { action: 'inbox',  token: '<jwt>' }              → list pesan
+ *   { action: 'read',   token: '<jwt>', id: '<msgId>'} → baca pesan
+ *   { action: 'delete', token: '<jwt>', id: '<msgId>'} → hapus pesan
+ * 
+ * Response:
+ *   { success: true, data: {...} }
  */
 
-const API = 'https://api.mail.tm';
+const axios = require('axios');
+
+const MAILTM_API = 'https://api.mail.tm';
+
+// Vercel config
+module.exports.config = {
+    api: {
+        bodyParser: {
+            sizeLimit: '1mb',
+        },
+    },
+    maxDuration: 30,
+};
 
 // ============================================================
 //  HELPERS
 // ============================================================
-const G = '\x1b[92m';   // green
-const R = '\x1b[91m';   // red
-const Y = '\x1b[93m';   // yellow
-const C = '\x1b[96m';   // cyan
-const B = '\x1b[94m';   // blue
-const X = '\x1b[0m';    // reset
-
-function log(icon, msg, color = '') {
-    console.log(`${color}${icon} ${msg}${X}`);
-}
-
-function sep(title) {
-    console.log(`\n${C}${'='.repeat(62)}${X}`);
-    console.log(`${C}  ${title}${X}`);
-    console.log(`${C}${'='.repeat(62)}${X}\n`);
-}
+const UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 ' +
+           '(KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36';
 
 function genUsername() {
     const hex = Array.from({ length: 8 }, () =>
@@ -44,321 +52,326 @@ function genPassword() {
     return pwd;
 }
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-
-// ============================================================
-//  CLASS TempMail
-// ============================================================
-class TempMail {
-    constructor(opts = {}) {
-        this.api = opts.api || API;
-        this.email = null;
-        this.password = null;
-        this.token = null;
-        this.accountId = null;
-        this.onProgress = opts.onProgress || (() => {});
-    }
-
-    _emit(step, info = {}) {
-        try { this.onProgress(step, info); } catch (_) {}
-    }
-
-    _headers(extra = {}) {
-        const h = {
-            'accept': 'application/json',
-            ...extra
-        };
-        if (this.token) {
-            h['authorization'] = `Bearer ${this.token}`;
-        }
-        return h;
-    }
-
-    async _fetch(path, opts = {}) {
-        const url = `${this.api}${path}`;
-        const headers = this._headers(opts.headers || {});
-        const res = await fetch(url, { ...opts, headers });
-        const text = await res.text();
-        let data;
-        try {
-            data = text ? JSON.parse(text) : {};
-        } catch (_) {
-            data = { raw: text };
-        }
-        return { ok: res.ok, status: res.status, data };
-    }
-
-    // -------- getDomains --------
-    async getDomains() {
-        this._emit('domains:start', {});
-        const res = await this._fetch('/domains?page=1');
-        if (!res.ok) {
-            throw new Error(`Get domains gagal: HTTP ${res.status}`);
-        }
-        const members = Array.isArray(res.data)
-            ? res.data
-            : (res.data['hydra:member'] || []);
-        const active = members.filter(d =>
-            d && d.isActive !== false && d.is_active !== false
-        );
-        if (!active.length) throw new Error('Gak ada domain aktif');
-        this._emit('domains:done', {
-            total: members.length,
-            active: active.length,
-            domain: active[0].domain
-        });
-        return active;
-    }
-
-    // -------- create (register + login) --------
-    async create(opts = {}) {
-        const maxRetry = opts.maxRetry || 5;
-        const domains = await this.getDomains();
-        const domain = domains[0].domain;
-
-        this._emit('account:start', { domain });
-
-        for (let attempt = 1; attempt <= maxRetry; attempt++) {
-            const username = genUsername();
-            const password = genPassword();
-            const address = `${username}@${domain}`;
-
-            this._emit('account:attempt', { attempt, address });
-
-            try {
-                // Register
-                const reg = await this._fetch('/accounts', {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/json' },
-                    body: JSON.stringify({ address, password })
-                });
-
-                if (!reg.ok) {
-                    this._emit('account:register_fail', {
-                        status: reg.status,
-                        msg: reg.data?.detail || reg.data?.message || 'unknown'
-                    });
-                    await sleep(1000);
-                    continue;
-                }
-
-                // Login
-                const login = await this._fetch('/token', {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/json' },
-                    body: JSON.stringify({ address, password })
-                });
-
-                if (!login.ok || !login.data?.token) {
-                    this._emit('account:login_fail', { status: login.status });
-                    await sleep(1000);
-                    continue;
-                }
-
-                this.email = address;
-                this.password = password;
-                this.token = login.data.token;
-                this.accountId = login.data.id;
-
-                this._emit('account:done', {
-                    email: this.email,
-                    id: this.accountId
-                });
-
-                return {
-                    email: this.email,
-                    password: this.password,
-                    token: this.token,
-                    id: this.accountId
-                };
-            } catch (e) {
-                this._emit('account:error', { attempt, msg: e.message });
-                await sleep(1000);
-            }
-        }
-
-        throw new Error(`Gagal bikin akun setelah ${maxRetry} percobaan`);
-    }
-
-    // -------- me --------
-    async me() {
-        const res = await this._fetch('/me');
-        if (!res.ok) throw new Error(`Get me gagal: HTTP ${res.status}`);
-        return res.data;
-    }
-
-    // -------- getInbox --------
-    async getInbox(page = 1) {
-        if (!this.token) throw new Error('Belum login');
-        const res = await this._fetch(`/messages?page=${page}`);
-        if (!res.ok) throw new Error(`Get inbox gagal: HTTP ${res.status}`);
-        const members = Array.isArray(res.data)
-            ? res.data
-            : (res.data['hydra:member'] || []);
-        this._emit('inbox:done', { count: members.length });
-        return members;
-    }
-
-    // -------- readMessage --------
-    async readMessage(id) {
-        if (!this.token) throw new Error('Belum login');
-        const res = await this._fetch(`/messages/${id}`);
-        if (!res.ok) throw new Error(`Read message gagal: HTTP ${res.status}`);
-        const m = res.data;
-
-        let body = '';
-        if (m.text) {
-            body = m.text;
-        } else if (m.html) {
-            const raw = Array.isArray(m.html) ? m.html.join('') : m.html;
-            body = raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-        }
-
-        return {
-            id: m.id,
-            from: m.from || {},
-            to: m.to || [],
-            subject: m.subject || '(tanpa subjek)',
-            intro: m.intro || '',
-            body: body || '(pesan kosong)',
-            createdAt: m.createdAt,
-            hasAttachments: m.hasAttachments || false,
-            attachments: m.attachments || []
-        };
-    }
-
-    // -------- deleteMessage --------
-    async deleteMessage(id) {
-        const res = await this._fetch(`/messages/${id}`, { method: 'DELETE' });
-        return res.ok;
-    }
-
-    // -------- deleteAccount --------
-    async deleteAccount() {
-        if (!this.accountId) return false;
-        const res = await this._fetch(`/accounts/${this.accountId}`, {
-            method: 'DELETE'
-        });
-        return res.ok;
-    }
-
-    isActive() {
-        return !!this.token;
-    }
-
-    reset() {
-        this.email = null;
-        this.password = null;
-        this.token = null;
-        this.accountId = null;
-    }
+function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
 }
 
+async function mailFetch(path, opts = {}) {
+    const headers = {
+        'accept': 'application/json',
+        'user-agent': UA,
+        ...(opts.headers || {}),
+    };
 
-// ============================================================
-//  MAIN — Test Full Flow
-// ============================================================
-async function main() {
-    console.log(`\n${B}${'='.repeat(62)}${X}`);
-    console.log(`${B}  🧪 mail.tm Temp Mail — JS Test${X}`);
-    console.log(`${B}${'='.repeat(62)}${X}\n`);
-
-    const tm = new TempMail({
-        onProgress: (step, info) => {
-            // Log tiap step
-            if (step === 'domains:done') {
-                log('✓', `Domain aktif: ${info.active}/${info.total} → ${info.domain}`, G);
-            } else if (step === 'account:attempt') {
-                log('🔄', `Attempt ${info.attempt}: ${info.address}`, Y);
-            } else if (step === 'account:register_fail') {
-                log('⚠️', `Register fail: ${info.msg}`, Y);
-            } else if (step === 'account:done') {
-                log('✓', `Akun jadi: ${info.email}`, G);
-            } else if (step === 'inbox:done') {
-                log('✓', `Inbox: ${info.count} pesan`, G);
-            }
-        }
+    const res = await axios({
+        url: `${MAILTM_API}${path}`,
+        method: opts.method || 'GET',
+        headers,
+        data: opts.body,
+        timeout: 20000,
+        validateStatus: () => true,
     });
 
-    try {
-        // 1. Bikin akun
-        sep('1️⃣  CREATE ACCOUNT');
-        const acc = await tm.create();
-
-        log('📧', `Email    : ${acc.email}`, C);
-        log('🔑', `Password : ${acc.password}`, C);
-        log('🎫', `Token    : ${acc.token.substring(0, 40)}...`, C);
-
-        // 2. Cek /me
-        sep('2️⃣  GET /ME');
-        const me = await tm.me();
-        log('✓', `ID       : ${me.id}`, G);
-        log('✓', `Verified : ${me.isVerified}`, G);
-
-        // 3. Ambil inbox
-        sep('3️⃣  GET INBOX');
-        let inbox = await tm.getInbox();
-        log('📬', `Total pesan: ${inbox.length}`, C);
-
-        if (inbox.length > 0) {
-            for (const m of inbox.slice(0, 3)) {
-                log('', `   • ${m.subject || '(tanpa subjek)'}`, Y);
-                log('', `     Dari: ${m.from?.address || '?'}`, Y);
-            }
-        } else {
-            log('ℹ️', 'Inbox kosong', Y);
-        }
-
-        // 4. Kalau ada pesan, baca yang pertama
-        if (inbox.length > 0) {
-            sep('4️⃣  READ MESSAGE');
-            const msg = await tm.readMessage(inbox[0].id);
-            log('📩', `Subjek: ${msg.subject}`, C);
-            log('👤', `Dari  : ${msg.from?.address || '?'}`, C);
-            log('📅', `Waktu : ${new Date(msg.createdAt).toLocaleString('id-ID')}`, C);
-            log('', '');
-            log('', '─── BODY ───', Y);
-            console.log(msg.body.substring(0, 500));
-        }
-
-        // 5. Polling manual (opsional)
-        sep('5️⃣  POLLING INBOX (30 detik)');
-        log('ℹ️', `Kirim email dari akun lain ke: ${acc.email}`, Y);
-        log('', '');
-
-        let found = false;
-        for (let i = 1; i <= 6; i++) {
-            await sleep(5000);
-            const msgs = await tm.getInbox();
-            log(`${i}`, `Polling #${i}: ${msgs.length} pesan`, Y);
-            if (msgs.length > inbox.length) {
-                log('✓', 'Ada pesan baru!', G);
-                for (const m of msgs) {
-                    log('', `   📩 ${m.subject || '(tanpa subjek)'}`, C);
-                }
-                found = true;
-                break;
-            }
-        }
-
-        if (!found) {
-            log('ℹ️', 'Belum ada pesan baru (normal kalau belum dikirim)', Y);
-        }
-
-        // Summary
-        sep('📊 SUMMARY');
-        log('✓', `Email: ${acc.email}`, G);
-        log('✓', `Password: ${acc.password}`, G);
-        log('', '');
-        log('💡', 'Buka https://mail.tm di browser buat login', C);
-        log('', `   Email: ${acc.email}`, Y);
-        log('', `   Pass : ${acc.password}`, Y);
-
-    } catch (e) {
-        log('❌', `Fatal: ${e.message}`, R);
-        console.error(e);
-    }
+    return {
+        ok: res.status >= 200 && res.status < 300,
+        status: res.status,
+        data: res.data,
+    };
 }
 
-main();
+// ============================================================
+//  ACTIONS
+// ============================================================
+
+// -------- CREATE ACCOUNT --------
+async function actionCreate() {
+    // 1. Get domains
+    const domRes = await mailFetch('/domains?page=1');
+    if (!domRes.ok) {
+        throw new Error(`Get domains gagal: HTTP ${domRes.status}`);
+    }
+
+    const members = Array.isArray(domRes.data)
+        ? domRes.data
+        : (domRes.data['hydra:member'] || []);
+
+    const active = members.filter(d =>
+        d && d.isActive !== false && d.is_active !== false
+    );
+
+    if (!active.length) {
+        throw new Error('Gak ada domain aktif');
+    }
+
+    const domain = active[0].domain;
+
+    // 2. Register + login dengan retry
+    const maxRetry = 5;
+    for (let attempt = 1; attempt <= maxRetry; attempt++) {
+        const username = genUsername();
+        const password = genPassword();
+        const address = `${username}@${domain}`;
+
+        try {
+            // Register
+            const reg = await mailFetch('/accounts', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: { address, password },
+            });
+
+            if (!reg.ok) {
+                console.log(`[mail] register attempt ${attempt} fail:`,
+                    reg.data?.detail || reg.data?.message || reg.status);
+                await sleep(800);
+                continue;
+            }
+
+            // Login
+            const login = await mailFetch('/token', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: { address, password },
+            });
+
+            if (!login.ok || !login.data?.token) {
+                console.log(`[mail] login attempt ${attempt} fail:`, login.status);
+                await sleep(800);
+                continue;
+            }
+
+            return {
+                email: address,
+                password: password,
+                token: login.data.token,
+                id: login.data.id,
+                domain: domain,
+            };
+        } catch (e) {
+            console.log(`[mail] attempt ${attempt} error:`, e.message);
+            await sleep(800);
+        }
+    }
+
+    throw new Error(`Gagal bikin akun setelah ${maxRetry} percobaan`);
+}
+
+// -------- ME --------
+async function actionMe(token) {
+    if (!token) throw new Error('token wajib');
+
+    const res = await mailFetch('/me', {
+        headers: { 'authorization': `Bearer ${token}` },
+    });
+
+    if (!res.ok) {
+        throw new Error(`Get me gagal: HTTP ${res.status}`);
+    }
+
+    return res.data;
+}
+
+// -------- INBOX --------
+async function actionInbox(token, page = 1) {
+    if (!token) throw new Error('token wajib');
+
+    const res = await mailFetch(`/messages?page=${page}`, {
+        headers: { 'authorization': `Bearer ${token}` },
+    });
+
+    if (!res.ok) {
+        throw new Error(`Get inbox gagal: HTTP ${res.status}`);
+    }
+
+    const members = Array.isArray(res.data)
+        ? res.data
+        : (res.data['hydra:member'] || []);
+
+    return {
+        count: members.length,
+        messages: members.map(m => ({
+            id: m.id,
+            from: {
+                address: m.from?.address || '',
+                name: m.from?.name || '',
+            },
+            subject: m.subject || '(tanpa subjek)',
+            intro: m.intro || '',
+            createdAt: m.createdAt,
+            hasAttachments: m.hasAttachments || false,
+            size: m.size || 0,
+        })),
+    };
+}
+
+// -------- READ --------
+async function actionRead(token, id) {
+    if (!token) throw new Error('token wajib');
+    if (!id) throw new Error('id wajib');
+
+    const res = await mailFetch(`/messages/${id}`, {
+        headers: { 'authorization': `Bearer ${token}` },
+    });
+
+    if (!res.ok) {
+        throw new Error(`Read message gagal: HTTP ${res.status}`);
+    }
+
+    const m = res.data;
+
+    // Body text — prefer text, fallback strip html
+    let body = '';
+    if (m.text) {
+        body = m.text;
+    } else if (m.html) {
+        const raw = Array.isArray(m.html) ? m.html.join('') : m.html;
+        body = raw.replace(/<[^>]+>/g, ' ')
+                  .replace(/&nbsp;/g, ' ')
+                  .replace(/&amp;/g, '&')
+                  .replace(/&lt;/g, '<')
+                  .replace(/&gt;/g, '>')
+                  .replace(/\s+/g, ' ')
+                  .trim();
+    }
+
+    return {
+        id: m.id,
+        from: {
+            address: m.from?.address || '',
+            name: m.from?.name || '',
+        },
+        to: (m.to || []).map(t => ({
+            address: t.address || '',
+            name: t.name || '',
+        })),
+        subject: m.subject || '(tanpa subjek)',
+        body: body || '(pesan kosong)',
+        createdAt: m.createdAt,
+        hasAttachments: m.hasAttachments || false,
+        attachments: (m.attachments || []).map(a => ({
+            id: a.id,
+            filename: a.filename,
+            contentType: a.contentType,
+            size: a.size,
+            downloadUrl: a.downloadUrl,
+        })),
+    };
+}
+
+// -------- DELETE --------
+async function actionDelete(token, id) {
+    if (!token) throw new Error('token wajib');
+    if (!id) throw new Error('id wajib');
+
+    const res = await mailFetch(`/messages/${id}`, {
+        method: 'DELETE',
+        headers: { 'authorization': `Bearer ${token}` },
+    });
+
+    return { deleted: res.ok, status: res.status };
+}
+
+// ============================================================
+//  HANDLER UTAMA
+// ============================================================
+module.exports = async function handler(req, res) {
+    // CORS
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Max-Age', '86400');
+
+    if (req.method === 'OPTIONS') {
+        return res.status(204).end();
+    }
+
+    // GET → info endpoint
+    if (req.method === 'GET') {
+        return res.json({
+            success: true,
+            info: 'Temp Mail API — proxy ke mail.tm',
+            usage: 'POST with JSON body { action, token?, id? }',
+            actions: [
+                { action: 'create',          body: '{}' },
+                { action: 'me',              body: '{ token }' },
+                { action: 'inbox',           body: '{ token, page? }' },
+                { action: 'read',            body: '{ token, id }' },
+                { action: 'delete',          body: '{ token, id }' },
+            ],
+        });
+    }
+
+    if (req.method !== 'POST') {
+        return res.status(405).json({
+            success: false,
+            error: 'Method not allowed. Gunakan POST.',
+        });
+    }
+
+    const startedAt = Date.now();
+
+    try {
+        // Body bisa object (Vercel auto-parse) atau string
+        let body = req.body;
+        if (typeof body === 'string') {
+            try {
+                body = JSON.parse(body);
+            } catch (_) {
+                body = {};
+            }
+        }
+        if (!body || typeof body !== 'object') body = {};
+
+        const { action, token, id, page } = body;
+
+        if (!action) {
+            return res.status(400).json({
+                success: false,
+                error: 'Field "action" wajib. Pilih: create / me / inbox / read / delete',
+            });
+        }
+
+        let data;
+
+        switch (action) {
+            case 'create':
+                data = await actionCreate();
+                break;
+
+            case 'me':
+                data = await actionMe(token);
+                break;
+
+            case 'inbox':
+                data = await actionInbox(token, page || 1);
+                break;
+
+            case 'read':
+                data = await actionRead(token, id);
+                break;
+
+            case 'delete':
+                data = await actionDelete(token, id);
+                break;
+
+            default:
+                return res.status(400).json({
+                    success: false,
+                    error: `Action "${action}" gak dikenal. Pilih: create / me / inbox / read / delete`,
+                });
+        }
+
+        return res.json({
+            success: true,
+            data,
+            elapsedMs: Date.now() - startedAt,
+        });
+    } catch (err) {
+        console.error('[mail]', err.message);
+        return res.status(500).json({
+            success: false,
+            error: err.message || 'Temp mail gagal',
+            elapsedMs: Date.now() - startedAt,
+        });
+    }
+};
