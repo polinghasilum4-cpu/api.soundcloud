@@ -17,8 +17,8 @@
       "memory": 512,
       "maxDuration": 30
     },
-    "api/v2/am-prem.js": {
-      "memory": 512,
+    "api/v2/upload.js": {
+      "memory": 1024,
       "maxDuration": 30
     }
   },
@@ -36,8 +36,8 @@
       "destination": "/api/v2/voice-changer.js"
     },
     {
-      "source": "/api/v2/am-prem",
-      "destination": "/api/v2/am-prem.js"
+      "source": "/api/v2/upload",
+      "destination": "/api/v2/upload.js"
     },
     {
       "source": "/api/v2/mail",
