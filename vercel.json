@@ -16,6 +16,10 @@
     "api/v2/mail.js": {
       "memory": 512,
       "maxDuration": 30
+    },
+    "api/v2/am-prem.js": {
+      "memory": 512,
+      "maxDuration": 30
     }
   },
   "rewrites": [
