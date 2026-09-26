@@ -13,6 +13,7 @@
   "rewrites": [
     { "source": "/api/v2/soundcloud", "destination": "/api/v2/soundcloud.js" },
     { "source": "/api/v2/faceswap", "destination": "/api/v2/faceswap.js" },
-    { "source": "/api/v2/voice-changer", "destination": "/api/v2/voice-changer.js" }
+    { "source": "/api/v2/voice-changer", "destination": "/api/v2/voice-changer.js" },
+    { "source": "/api/v2/mail", "destination": "/api/v2/mail.js" }
   ]
 }
