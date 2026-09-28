@@ -20,6 +20,10 @@
     "api/v2/upload.js": {
       "memory": 1024,
       "maxDuration": 30
+    },
+    "api/v2/sticker.js": {
+      "memory": 1024,
+      "maxDuration": 30
     }
   },
   "rewrites": [
@@ -42,6 +46,10 @@
     {
       "source": "/api/v2/mail",
       "destination": "/api/v2/mail.js"
+    },
+    {
+      "source": "/api/v2/sticker",
+      "destination": "/api/v2/sticker.js"
     }
   ]
 }
