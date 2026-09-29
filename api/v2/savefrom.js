@@ -4,6 +4,10 @@
  * Endpoint: POST /api/v2/savefrom
  * Body    : { "url": "https://..." }
  * Response: { "success": true, "options": [...] }
+ * 
+ * Requires:
+ *   - @sparticuz/chromium (NON-min)
+ *   - puppeteer-core
  */
 
 const puppeteer = require('puppeteer-core');
@@ -11,13 +15,10 @@ const chromium = require('@sparticuz/chromium');
 
 const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36';
 
-// Chromium binary CDN (buat chromium-min)
-const CHROMIUM_PACK_URL = 'https://github.com/Sparticuz/chromium/releases/download/v131.0.0/chromium-v131.0.0-pack.tar';
-
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 module.exports = async (req, res) => {
-    // CORS
+    // ============ CORS ============
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -27,8 +28,12 @@ module.exports = async (req, res) => {
         return res.status(405).json({ success: false, error: 'Method not allowed' });
     }
 
-    // Parse body (Vercel udah auto-parse JSON kalau content-type JSON)
-    const { url } = req.body || {};
+    // ============ PARSE BODY ============
+    let body = req.body;
+    if (typeof body === 'string') {
+        try { body = JSON.parse(body); } catch (e) { body = {}; }
+    }
+    const url = body && body.url;
 
     if (!url || !/^https?:\/\//.test(url)) {
         return res.status(400).json({ success: false, error: 'URL tidak valid' });
@@ -39,7 +44,10 @@ module.exports = async (req, res) => {
     let browser = null;
 
     try {
-        // Launch Chromium (Vercel-optimized)
+        // ============ LAUNCH CHROMIUM ============
+        const execPath = await chromium.executablePath();
+        console.log('[savefrom] execPath:', execPath);
+
         browser = await puppeteer.launch({
             args: [
                 ...chromium.args,
@@ -56,10 +64,11 @@ module.exports = async (req, res) => {
                 isMobile: true,
                 hasTouch: true,
             },
-            executablePath: await chromium.executablePath(CHROMIUM_PACK_URL),
+            executablePath: execPath,
             headless: chromium.headless,
         });
 
+        // ============ SETUP PAGE ============
         const page = await browser.newPage();
         await page.setUserAgent(MOBILE_UA);
         await page.setExtraHTTPHeaders({
@@ -73,88 +82,135 @@ module.exports = async (req, res) => {
             Object.defineProperty(navigator, 'languages', {
                 get: () => ['id-ID', 'id', 'en-US', 'en']
             });
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
         });
 
-        // Buka savefrom
+        // ============ OPEN SAVEFROM ============
+        console.log('[savefrom] opening savefrom.co.id...');
         await page.goto('https://savefrom.co.id/', {
             waitUntil: 'domcontentloaded',
             timeout: 25000,
         });
         await sleep(2500);
 
-        // Cari input field
+        // ============ FIND INPUT ============
         const inputSelectors = [
             'input#sf_url',
             'input[name="sf_url"]',
             'input[type="url"]',
             'input[type="text"]',
+            'input[placeholder*="URL"]',
+            'input[placeholder*="link"]',
         ];
 
         let inputEl = null;
+        let usedSelector = null;
         for (const sel of inputSelectors) {
-            inputEl = await page.$(sel);
-            if (inputEl) {
-                console.log('[savefrom] input found:', sel);
-                break;
-            }
+            try {
+                inputEl = await page.$(sel);
+                if (inputEl) {
+                    usedSelector = sel;
+                    console.log('[savefrom] input found:', sel);
+                    break;
+                }
+            } catch (e) { continue; }
         }
 
         if (!inputEl) {
             throw new Error('Input field SaveFrom tidak ditemukan (DOM berubah?)');
         }
 
-        // Isi & submit
+        // ============ FILL & SUBMIT ============
         await inputEl.click();
         await page.evaluate(el => el.value = '', inputEl);
         await inputEl.type(url, { delay: 20 });
         await sleep(300);
 
         let clicked = false;
-        for (const sel of ['button[type="submit"]', 'button.sf-btn', 'input[type="submit"]']) {
-            const btn = await page.$(sel);
-            if (btn) {
-                await btn.click();
-                clicked = true;
-                break;
-            }
+        const btnSelectors = [
+            'button[type="submit"]',
+            'button.sf-btn',
+            'input[type="submit"]',
+        ];
+        for (const sel of btnSelectors) {
+            try {
+                const btn = await page.$(sel);
+                if (btn) {
+                    await btn.click();
+                    clicked = true;
+                    console.log('[savefrom] clicked:', sel);
+                    break;
+                }
+            } catch (e) { continue; }
         }
-        if (!clicked) await inputEl.press('Enter');
+        if (!clicked) {
+            console.log('[savefrom] button not found, pressing Enter');
+            await inputEl.press('Enter');
+        }
 
-        // Polling max 30s
+        // ============ POLLING ============
+        console.log('[savefrom] waiting for results...');
         const pollStart = Date.now();
         let found = false;
+        let hasError = false;
+
         while (Date.now() - pollStart < 30000) {
             await sleep(1200);
-            const has = await page.evaluate(() => {
+            const status = await page.evaluate(() => {
                 const links = document.querySelectorAll('a');
+                let hasValidLink = false;
                 for (const a of links) {
                     const h = a.href || '';
                     if (h.includes('fbcdn') || h.includes('googlevideo') ||
-                        h.includes('.mp4') || h.includes('cdn')) return true;
+                        h.includes('.mp4') || h.includes('cdn')) {
+                        hasValidLink = true;
+                        break;
+                    }
                 }
-                return false;
+                const body = document.body.innerText || '';
+                const hasErr = body.includes('Something went wrong') ||
+                               body.includes('invalid_request');
+                return { hasValidLink, hasErr };
             });
-            if (has) { found = true; break; }
+
+            if (status.hasValidLink) {
+                found = true;
+                console.log('[savefrom] results appeared!');
+                break;
+            }
+            if (status.hasErr) {
+                hasError = true;
+                break;
+            }
         }
 
+        if (hasError && !found) {
+            throw new Error('SaveFrom return error (rate limit / IP block?)');
+        }
         if (!found) {
             throw new Error('Timeout: link download gak muncul dalam 30s');
         }
 
         await sleep(1500);
 
-        // Scrape links
+        // ============ SCRAPE LINKS ============
+        console.log('[savefrom] scraping links...');
         const rawLinks = await page.evaluate(() => {
             const out = [];
             document.querySelectorAll('a').forEach(a => {
                 const href = a.href || '';
                 const text = (a.innerText || a.textContent || '').trim();
+
                 if (href.startsWith('https://savefrom.co.id/') ||
                     href.startsWith('https://downloadhelper.app/')) return;
 
                 const isVideo = href.includes('fbcdn') || href.includes('googlevideo') ||
-                                href.includes('.mp4') || href.includes('video') || href.includes('cdn');
-                const isAudio = href.includes('.mp3') || href.includes('audio') || href.includes('.m4a');
+                                href.includes('.mp4') || href.includes('video') ||
+                                href.includes('cdn');
+                const isAudio = href.includes('.mp3') || href.includes('audio') ||
+                                href.includes('.m4a');
 
                 if (isVideo || isAudio) {
                     out.push({
@@ -167,7 +223,7 @@ module.exports = async (req, res) => {
             return out;
         });
 
-        // Build options
+        // ============ BUILD OPTIONS ============
         const options = [];
         const seenBitrates = new Set();
 
@@ -186,6 +242,7 @@ module.exports = async (req, res) => {
 
             // Deteksi kualitas
             let quality = null;
+
             if (tagLower.includes('1080') || textUpper.includes('1080') || textUpper.includes('FULL HD')) {
                 quality = 'Full HD (1080p)';
             } else if (tagLower.includes('720') || textUpper.includes('720')) {
@@ -208,26 +265,34 @@ module.exports = async (req, res) => {
                 else if (brInt >= 50000) quality = '240p';
             }
 
-            if (!quality) quality = link.type === 'audio' ? 'Audio (M4A)' : 'MP4';
+            if (!quality) {
+                quality = link.type === 'audio' ? 'Audio (M4A)' : 'MP4';
+            }
 
+            // Dedupe
             const key = bitrate || href.split('?')[0].slice(0, 200);
             if (seenBitrates.has(key)) continue;
             seenBitrates.add(key);
 
             options.push({
                 label: quality,
-                text,
+                text: text,
                 url: href,
                 type: link.type,
-                bitrate,
+                bitrate: bitrate,
                 sizeHint: brInt ? Math.round(brInt * 60 / 8) : null,
             });
         }
 
         // Sort: HD di atas, audio di bawah
         const order = {
-            'Full HD (1080p)': 0, 'HD (720p)': 1, '480p': 2, '360p': 3,
-            '240p': 4, 'MP4': 5, 'Audio (M4A)': 6
+            'Full HD (1080p)': 0,
+            'HD (720p)': 1,
+            '480p': 2,
+            '360p': 3,
+            '240p': 4,
+            'MP4': 5,
+            'Audio (M4A)': 6,
         };
         options.sort((a, b) => (order[a.label] ?? 99) - (order[b.label] ?? 99));
 
@@ -236,8 +301,8 @@ module.exports = async (req, res) => {
 
         return res.status(200).json({
             success: true,
-            url,
-            options,
+            url: url,
+            options: options,
             elapsed: parseFloat(elapsed),
         });
 
