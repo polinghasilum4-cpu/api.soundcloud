@@ -1,13 +1,18 @@
 /**
- * SaveFrom Scraper — Vercel Serverless Function
- * ============================================
+ * SaveFrom Scraper — Vercel Serverless Function (fixed)
  * Endpoint: POST /api/v2/savefrom
- * Body    : { "url": "https://..." }
- * Response: { "success": true, "options": [...] }
  * 
- * Requires:
- *   - @sparticuz/chromium (NON-min)
- *   - puppeteer-core
+ * FIXES:
+ *   - Removed --single-process & --no-zygote (crash on Vercel)
+ *   - Removed duplicate chromium.args
+ *   - Removed UA duplication (set via page.setUserAgent)
+ *   - Reduced internal timeouts to fit Vercel 60s limit
+ * 
+ * ENV VARS required in Vercel Dashboard:
+ *   AWS_LAMBDA_JS_RUNTIME = nodejs20.x
+ * 
+ * vercel.json config required:
+ *   "api/v2/savefrom.js": { "memory": 1024, "maxDuration": 60 }
  */
 
 const puppeteer = require('puppeteer-core');
@@ -18,7 +23,6 @@ const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML,
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 module.exports = async (req, res) => {
-    // ============ CORS ============
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -28,7 +32,6 @@ module.exports = async (req, res) => {
         return res.status(405).json({ success: false, error: 'Method not allowed' });
     }
 
-    // ============ PARSE BODY ============
     let body = req.body;
     if (typeof body === 'string') {
         try { body = JSON.parse(body); } catch (e) { body = {}; }
@@ -44,19 +47,17 @@ module.exports = async (req, res) => {
     let browser = null;
 
     try {
-        // ============ LAUNCH CHROMIUM ============
         const execPath = await chromium.executablePath();
         console.log('[savefrom] execPath:', execPath);
 
+        // ============ LAUNCH CHROMIUM ============
+        // NOTE: chromium.args sudah include --no-sandbox, --disable-dev-shm-usage,
+        //       --single-process (TIDAK — jangan tambah!), --no-zygote (jangan tambah!)
         browser = await puppeteer.launch({
             args: [
                 ...chromium.args,
                 '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
-                '--no-sandbox',
-                '--no-zygote',
-                '--single-process',
-                `--user-agent=${MOBILE_UA}`,
+                '--disable-features=IsolateOrigins,site-per-process',
             ],
             defaultViewport: {
                 width: 412,
@@ -66,6 +67,7 @@ module.exports = async (req, res) => {
             },
             executablePath: execPath,
             headless: chromium.headless,
+            ignoreHTTPSErrors: true,
         });
 
         // ============ SETUP PAGE ============
@@ -75,7 +77,6 @@ module.exports = async (req, res) => {
             'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
         });
 
-        // Stealth
         await page.evaluateOnNewDocument(() => {
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             window.chrome = { runtime: {} };
@@ -91,9 +92,9 @@ module.exports = async (req, res) => {
         console.log('[savefrom] opening savefrom.co.id...');
         await page.goto('https://savefrom.co.id/', {
             waitUntil: 'domcontentloaded',
-            timeout: 25000,
+            timeout: 15000,
         });
-        await sleep(2500);
+        await sleep(1500);
 
         // ============ FIND INPUT ============
         const inputSelectors = [
@@ -106,12 +107,10 @@ module.exports = async (req, res) => {
         ];
 
         let inputEl = null;
-        let usedSelector = null;
         for (const sel of inputSelectors) {
             try {
                 inputEl = await page.$(sel);
                 if (inputEl) {
-                    usedSelector = sel;
                     console.log('[savefrom] input found:', sel);
                     break;
                 }
@@ -119,7 +118,7 @@ module.exports = async (req, res) => {
         }
 
         if (!inputEl) {
-            throw new Error('Input field SaveFrom tidak ditemukan (DOM berubah?)');
+            throw new Error('Input field SaveFrom tidak ditemukan');
         }
 
         // ============ FILL & SUBMIT ============
@@ -156,8 +155,8 @@ module.exports = async (req, res) => {
         let found = false;
         let hasError = false;
 
-        while (Date.now() - pollStart < 30000) {
-            await sleep(1200);
+        while (Date.now() - pollStart < 20000) {
+            await sleep(1000);
             const status = await page.evaluate(() => {
                 const links = document.querySelectorAll('a');
                 let hasValidLink = false;
@@ -190,10 +189,10 @@ module.exports = async (req, res) => {
             throw new Error('SaveFrom return error (rate limit / IP block?)');
         }
         if (!found) {
-            throw new Error('Timeout: link download gak muncul dalam 30s');
+            throw new Error('Timeout: link download gak muncul dalam 20s');
         }
 
-        await sleep(1500);
+        await sleep(1000);
 
         // ============ SCRAPE LINKS ============
         console.log('[savefrom] scraping links...');
@@ -240,7 +239,6 @@ module.exports = async (req, res) => {
             const tagLower = tag.toLowerCase();
             const textUpper = text.toUpperCase();
 
-            // Deteksi kualitas
             let quality = null;
 
             if (tagLower.includes('1080') || textUpper.includes('1080') || textUpper.includes('FULL HD')) {
@@ -269,7 +267,6 @@ module.exports = async (req, res) => {
                 quality = link.type === 'audio' ? 'Audio (M4A)' : 'MP4';
             }
 
-            // Dedupe
             const key = bitrate || href.split('?')[0].slice(0, 200);
             if (seenBitrates.has(key)) continue;
             seenBitrates.add(key);
@@ -284,7 +281,6 @@ module.exports = async (req, res) => {
             });
         }
 
-        // Sort: HD di atas, audio di bawah
         const order = {
             'Full HD (1080p)': 0,
             'HD (720p)': 1,
