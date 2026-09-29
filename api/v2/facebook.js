@@ -1,14 +1,20 @@
 /**
  * SaveFrom Scraper — Vercel Serverless Function
- * POST /api/savefrom
- * Body: { "url": "https://..." }
+ * ============================================
+ * Endpoint: POST /api/v2/savefrom
+ * Body    : { "url": "https://..." }
  * Response: { "success": true, "options": [...] }
  */
 
 const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
+const chromium = require('@sparticuz/chromium-min');
 
 const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36';
+
+// Chromium binary CDN (buat chromium-min)
+const CHROMIUM_PACK_URL = 'https://github.com/Sparticuz/chromium/releases/download/v131.0.0/chromium-v131.0.0-pack.tar';
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 module.exports = async (req, res) => {
     // CORS
@@ -16,32 +22,32 @@ module.exports = async (req, res) => {
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
-    }
-
+    if (req.method === 'OPTIONS') return res.status(200).end();
     if (req.method !== 'POST') {
         return res.status(405).json({ success: false, error: 'Method not allowed' });
     }
 
+    // Parse body (Vercel udah auto-parse JSON kalau content-type JSON)
     const { url } = req.body || {};
+
     if (!url || !/^https?:\/\//.test(url)) {
         return res.status(400).json({ success: false, error: 'URL tidak valid' });
     }
 
     console.log('[savefrom] request:', url);
-
-    let browser = null;
     const startTime = Date.now();
+    let browser = null;
 
     try {
-        // Launch headless Chromium (Vercel-optimized)
+        // Launch Chromium (Vercel-optimized)
         browser = await puppeteer.launch({
             args: [
                 ...chromium.args,
                 '--disable-blink-features=AutomationControlled',
-                '--single-process',
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
                 '--no-zygote',
+                '--single-process',
                 `--user-agent=${MOBILE_UA}`,
             ],
             defaultViewport: {
@@ -50,33 +56,33 @@ module.exports = async (req, res) => {
                 isMobile: true,
                 hasTouch: true,
             },
-            executablePath: await chromium.executablePath(),
+            executablePath: await chromium.executablePath(CHROMIUM_PACK_URL),
             headless: chromium.headless,
         });
 
         const page = await browser.newPage();
         await page.setUserAgent(MOBILE_UA);
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+        });
 
         // Stealth
         await page.evaluateOnNewDocument(() => {
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             window.chrome = { runtime: {} };
-        });
-
-        // Set referer header biar kayak browser asli
-        await page.setExtraHTTPHeaders({
-            'Accept-Language': 'id-ID,id;q=0.9,en;q=0.8',
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['id-ID', 'id', 'en-US', 'en']
+            });
         });
 
         // Buka savefrom
         await page.goto('https://savefrom.co.id/', {
             waitUntil: 'domcontentloaded',
-            timeout: 30000,
+            timeout: 25000,
         });
+        await sleep(2500);
 
-        await sleep(3000);
-
-        // Cari input
+        // Cari input field
         const inputSelectors = [
             'input#sf_url',
             'input[name="sf_url"]',
@@ -87,11 +93,14 @@ module.exports = async (req, res) => {
         let inputEl = null;
         for (const sel of inputSelectors) {
             inputEl = await page.$(sel);
-            if (inputEl) break;
+            if (inputEl) {
+                console.log('[savefrom] input found:', sel);
+                break;
+            }
         }
 
         if (!inputEl) {
-            throw new Error('Input field tidak ditemukan (DOM mungkin berubah)');
+            throw new Error('Input field SaveFrom tidak ditemukan (DOM berubah?)');
         }
 
         // Isi & submit
@@ -111,11 +120,11 @@ module.exports = async (req, res) => {
         }
         if (!clicked) await inputEl.press('Enter');
 
-        // Polling max 40s
+        // Polling max 30s
         const pollStart = Date.now();
         let found = false;
-        while (Date.now() - pollStart < 40000) {
-            await sleep(1500);
+        while (Date.now() - pollStart < 30000) {
+            await sleep(1200);
             const has = await page.evaluate(() => {
                 const links = document.querySelectorAll('a');
                 for (const a of links) {
@@ -129,7 +138,7 @@ module.exports = async (req, res) => {
         }
 
         if (!found) {
-            throw new Error('Timeout: SaveFrom tidak return link dalam 40s');
+            throw new Error('Timeout: link download gak muncul dalam 30s');
         }
 
         await sleep(1500);
@@ -164,7 +173,7 @@ module.exports = async (req, res) => {
 
         for (const link of rawLinks) {
             const href = link.href.trim();
-            let text = link.text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+            const text = link.text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
 
             const brMatch = href.match(/bitrate=(\d+)/);
             const bitrate = brMatch ? brMatch[1] : null;
@@ -199,7 +208,7 @@ module.exports = async (req, res) => {
                 else if (brInt >= 50000) quality = '240p';
             }
 
-            if (!quality) quality = link.type === 'audio' ? 'Audio' : 'MP4';
+            if (!quality) quality = link.type === 'audio' ? 'Audio (M4A)' : 'MP4';
 
             const key = bitrate || href.split('?')[0].slice(0, 200);
             if (seenBitrates.has(key)) continue;
@@ -215,12 +224,15 @@ module.exports = async (req, res) => {
             });
         }
 
-        // Sort
-        const order = { 'Full HD (1080p)': 0, 'HD (720p)': 1, '480p': 2, '360p': 3, '240p': 4, 'MP4': 5, 'Audio': 6 };
+        // Sort: HD di atas, audio di bawah
+        const order = {
+            'Full HD (1080p)': 0, 'HD (720p)': 1, '480p': 2, '360p': 3,
+            '240p': 4, 'MP4': 5, 'Audio (M4A)': 6
+        };
         options.sort((a, b) => (order[a.label] ?? 99) - (order[b.label] ?? 99));
 
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-        console.log(`[savefrom] done in ${elapsed}s, ${options.length} options`);
+        console.log(`[savefrom] success in ${elapsed}s, ${options.length} options`);
 
         return res.status(200).json({
             success: true,
@@ -234,7 +246,7 @@ module.exports = async (req, res) => {
         return res.status(500).json({
             success: false,
             error: err.message || 'Scrape gagal',
-            elapsed: ((Date.now() - startTime) / 1000).toFixed(1),
+            elapsed: parseFloat(((Date.now() - startTime) / 1000).toFixed(1)),
         });
     } finally {
         if (browser) {
@@ -242,7 +254,3 @@ module.exports = async (req, res) => {
         }
     }
 };
-
-function sleep(ms) {
-    return new Promise(r => setTimeout(r, ms));
-}
