@@ -24,6 +24,10 @@
     "api/v2/iqc.js": {
       "memory": 512,
       "maxDuration": 30
+    },
+    "api/v2/savefrom.js": {
+      "memory": 1024,
+      "maxDuration": 60
     }
   },
   "rewrites": [
@@ -50,6 +54,10 @@
     {
       "source": "/api/v2/iqc",
       "destination": "/api/v2/iqc.js"
+    },
+    {
+      "source": "/api/v2/savefrom",
+      "destination": "/api/v2/savefrom.js"
     }
   ]
 }
