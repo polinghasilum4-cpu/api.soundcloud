@@ -21,7 +21,7 @@
       "memory": 1024,
       "maxDuration": 30
     },
-    "api/v2/sticker.js": {
+    "api/v2/iqc.js": {
       "memory": 512,
       "maxDuration": 30
     }
