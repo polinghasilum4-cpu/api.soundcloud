@@ -7,6 +7,8 @@
  *   - time : 1h / 12h / 24h / 72h (default 24h)
  */
 
+const { securityCheck } = require("../_security");
+
 const axios = require('axios');
 const FormData = require('form-data');
 const { formidable } = require('formidable');
@@ -21,9 +23,6 @@ const LITTERBOX = 'https://litterbox.catbox.moe/resources/internals/api.php';
 const VALID_TIMES = ['1h', '12h', '24h', '72h'];
 
 module.exports = async function handler(req, res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Access-Control-Max-Age', '86400');
 
     if (req.method === 'OPTIONS') return res.status(204).end();

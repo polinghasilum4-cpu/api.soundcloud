@@ -15,6 +15,8 @@
  *   { success: true, data: {...} }
  */
 
+const { securityCheck } = require("../_security");
+
 const axios = require('axios');
 
 const MAILTM_API = 'https://api.mail.tm';
@@ -276,9 +278,6 @@ async function actionDelete(token, id) {
 // ============================================================
 module.exports = async function handler(req, res) {
     // CORS
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     res.setHeader('Access-Control-Max-Age', '86400');
 
     if (req.method === 'OPTIONS') {

@@ -15,6 +15,8 @@
  *   "api/v2/savefrom.js": { "memory": 1024, "maxDuration": 60 }
  */
 
+const { securityCheck } = require("../_security");
+
 const puppeteer = require('puppeteer-core');
 const chromium = require('@sparticuz/chromium');
 
@@ -23,9 +25,7 @@ const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML,
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 module.exports = async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (securityCheck(req, res)) return;
 
     if (req.method === 'OPTIONS') return res.status(200).end();
     if (req.method !== 'POST') {

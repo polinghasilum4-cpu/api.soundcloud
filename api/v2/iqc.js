@@ -1,4 +1,6 @@
 /* ============================================================
+const { securityCheck } = require("../_security");
+
    api/v2/iqc.js — Fake Quote iOS proxy
    Endpoint: GET /api/v2/iqc?text=<QUOTE_TEXT>
    Proxy ke izuka-api canvas, return image langsung
@@ -7,10 +9,9 @@
 const IZUKA_API = 'https://my.izuka-api.xyz/api/canvas/iqc';
 
 module.exports = async (req, res) => {
+  if (securityCheck(req, res)) return;
+
   // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', '*');
   if (req.method === 'OPTIONS') return res.status(204).end();
 
   const text = (req.query.text || '').trim();
