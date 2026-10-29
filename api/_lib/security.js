@@ -1,86 +1,182 @@
 /**
- * xs0ciety API Security Layer
- * Only allows: https://xs0cietylabsz.biz.id
+ * _lib/security.js — Shared hardening middleware
+ * ================================================
+ * Env vars (set di Vercel Project Settings → Environment Variables):
+ *   API_KEYS          = "key1,key2"   → kalau kosong, endpoint TETAP TERBUKA (no-op, backward compatible).
+ *                        Isi ini supaya cuma client yang punya key (bot WA/Telegram/web lo) yang bisa panggil API.
+ *   ALLOWED_ORIGINS   = "https://situs-lo.com,https://app-lo.com" → kalau kosong, CORS fallback ke '*'
+ *                        (browser lain masih bisa fetch, tapi ini TIDAK menghalangi bot/curl/Node —
+ *                        CORS cuma ditegakkan oleh browser, bukan oleh server lain. API_KEYS yang
+ *                        beneran nahan scraper/bot).
+ *
+ * PENTING: CORS lock & API key adalah 2 lapisan BEDA.
+ *   - ALLOWED_ORIGINS → cegah situs lain nge-embed/fetch API lo dari browser korban.
+ *   - API_KEYS        → cegah siapapun (bot, curl, script scraper) manggil API tanpa izin.
+ * Untuk tujuan "API gua ga bisa diambil scraper / bot Tele / WA gua", yang paling ngaruh itu API_KEYS.
  */
-const ALLOWED_ORIGINS = [
-  "https://xs0cietylabsz.biz.id",
-  "https://www.xs0cietylabsz.biz.id",
-];
 
-// Set this in Vercel Environment Variables: XS_API_SECRET
-const API_SECRET = process.env.XS_API_SECRET || "xs0ciety_CHANGE_ME_TO_LONG_RANDOM_SECRET_32chars";
+const dns = require('dns').promises;
+const net = require('net');
+const crypto = require('crypto');
 
-const BLOCKED_UA = [
-  /telegram/i, /whatsapp/i, /bot\b/i, /curl\//i, /wget\//i,
-  /python-requests/i, /scrapy/i, /httpclient/i, /go-http-client/i,
-  /java\//i, /libwww/i, /postman/i, /insomnia/i, /httpie/i
-];
+// ---------------------------------------------------------------------
+// Config dari env
+// ---------------------------------------------------------------------
+const API_KEYS = (process.env.API_KEYS || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
 
-function getOrigin(req) {
-  return (req.headers.origin || req.headers.referer || "").toString();
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+
+// ---------------------------------------------------------------------
+// IP extraction (trust proxy: Cloudflare / Vercel)
+// ---------------------------------------------------------------------
+function getClientIp(req) {
+    const cf = req.headers['cf-connecting-ip'];
+    if (cf) return cf.trim();
+    const xff = req.headers['x-forwarded-for'];
+    if (xff) return xff.split(',')[0].trim();
+    const xrip = req.headers['x-real-ip'];
+    if (xrip) return xrip.trim();
+    return (req.socket && req.socket.remoteAddress) || 'unknown';
 }
 
-function isAllowedOrigin(origin) {
-  if (!origin) return false;
-  try {
-    const normalized = origin.split("?")[0].replace(/\/$/, "");
-    return ALLOWED_ORIGINS.some((allowed) => {
-      return normalized === allowed || normalized.startsWith(allowed + "/");
-    });
-  } catch {
-    return false;
-  }
+// ---------------------------------------------------------------------
+// CORS
+// ---------------------------------------------------------------------
+function applyCors(req, res, { methods = 'GET, POST, OPTIONS' } = {}) {
+    const origin = req.headers.origin;
+
+    if (ALLOWED_ORIGINS.length > 0) {
+        if (origin && ALLOWED_ORIGINS.includes(origin)) {
+            res.setHeader('Access-Control-Allow-Origin', origin);
+            res.setHeader('Vary', 'Origin');
+        }
+        // origin lain / tanpa origin (server-to-server) → header ini gak di-set,
+        // browser lain akan ke-block CORS-nya sendiri.
+    } else {
+        // belum dikonfigurasi -> fallback permisif, biar gak ngerusak integrasi existing
+        res.setHeader('Access-Control-Allow-Origin', '*');
+    }
+
+    res.setHeader('Access-Control-Allow-Methods', methods);
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Api-Key, X-Filename, X-Requested-With');
+    res.setHeader('Access-Control-Max-Age', '86400');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
 }
 
-/**
- * Returns true if request was blocked (response already sent)
- * Returns false if request is allowed (continue processing)
- */
-function securityCheck(req, res) {
-  const origin = req.headers.origin || "";
-
-  // CORS headers
-  if (isAllowedOrigin(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-  } else {
-    // Still set a restrictive default
-    res.setHeader("Access-Control-Allow-Origin", "https://xs0cietylabsz.biz.id");
-  }
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-XS-Key, X-Requested-With");
-  res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("Vary", "Origin");
-  res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("X-Frame-Options", "DENY");
-
-  // Preflight
-  if (req.method === "OPTIONS") {
-    res.status(204).end();
-    return true;
-  }
-
-  // Strict Origin / Referer check
-  const reqOrigin = getOrigin(req);
-  if (!isAllowedOrigin(reqOrigin)) {
-    res.status(403).json({ status: false, message: "Forbidden" });
-    return true;
-  }
-
-  // Secret key check
-  const key = (req.headers["x-xs-key"] || "").toString().trim();
-  if (!key || key !== API_SECRET) {
-    res.status(401).json({ status: false, message: "Unauthorized" });
-    return true;
-  }
-
-  // Block common bots / scrapers
-  const ua = (req.headers["user-agent"] || "").toString();
-  if (!ua || BLOCKED_UA.some((r) => r.test(ua))) {
-    res.status(403).json({ status: false, message: "Forbidden" });
-    return true;
-  }
-
-  return false; // allowed
+// ---------------------------------------------------------------------
+// API key (timing-safe compare)
+// ---------------------------------------------------------------------
+function timingSafeStringEqual(a, b) {
+    const bufA = Buffer.from(String(a));
+    const bufB = Buffer.from(String(b));
+    if (bufA.length !== bufB.length) {
+        // tetap jalanin compare dummy biar durasi konsisten (anti timing attack)
+        crypto.timingSafeEqual(bufA, bufA);
+        return false;
+    }
+    return crypto.timingSafeEqual(bufA, bufB);
 }
 
-module.exports = { securityCheck, ALLOWED_ORIGINS, API_SECRET };
+function requireApiKey(req, res) {
+    if (API_KEYS.length === 0) return true; // belum di-set di env -> endpoint tetap terbuka
+
+    const key = req.headers['x-api-key'] || (req.query && req.query.apikey);
+    if (!key) {
+        res.status(401).json({ success: false, error: 'Missing API key. Kirim header X-Api-Key.' });
+        return false;
+    }
+    const valid = API_KEYS.some(k => timingSafeStringEqual(key, k));
+    if (!valid) {
+        res.status(401).json({ success: false, error: 'API key tidak valid.' });
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------
+// Rate limiting (in-memory, per instance)
+// CATATAN: Vercel serverless = tiap cold start/region punya memory sendiri,
+// jadi ini "best effort", bukan rate limit global yang presisi. Untuk
+// limit yang akurat lintas region, pakai Upstash Redis (@upstash/ratelimit).
+// ---------------------------------------------------------------------
+const buckets = new Map();
+
+function rateLimit(req, res, { windowMs = 60000, max = 30 } = {}) {
+    const ip = getClientIp(req);
+    const now = Date.now();
+    let b = buckets.get(ip);
+
+    if (!b || now - b.start > windowMs) {
+        b = { start: now, count: 0 };
+        buckets.set(ip, b);
+    }
+    b.count++;
+
+    if (buckets.size > 5000) { // simple cleanup biar gak bocor memory
+        for (const [k, v] of buckets) {
+            if (now - v.start > windowMs * 5) buckets.delete(k);
+        }
+    }
+
+    if (b.count > max) {
+        res.setHeader('Retry-After', Math.ceil((b.start + windowMs - now) / 1000));
+        res.status(429).json({ success: false, error: 'Terlalu banyak request, coba lagi sebentar lagi.' });
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------
+// SSRF guard — validasi URL + resolve DNS, tolak kalau mengarah ke IP privat
+// (RFC1918, loopback, link-local 169.254.0.0/16 termasuk metadata 169.254.169.254)
+// ---------------------------------------------------------------------
+function isPrivateIp(ip) {
+    if (net.isIPv6(ip)) {
+        const low = ip.toLowerCase();
+        return low === '::1' || low.startsWith('fe80:') || low.startsWith('fc') || low.startsWith('fd') || low.startsWith('::ffff:127.');
+    }
+    return /^(127\.|10\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|0\.)/.test(ip);
+}
+
+async function assertPublicUrl(urlStr) {
+    let u;
+    try { u = new URL(urlStr); } catch { throw new Error('URL tidak valid'); }
+
+    if (!['http:', 'https:'].includes(u.protocol)) {
+        throw new Error(`Protocol ${u.protocol} tidak diizinkan`);
+    }
+
+    const host = u.hostname.toLowerCase();
+    if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) {
+        throw new Error('Hostname tidak diizinkan');
+    }
+
+    if (net.isIP(host)) {
+        if (isPrivateIp(host)) throw new Error('Private/internal IP tidak diizinkan');
+        return u;
+    }
+
+    let addrs = [];
+    try {
+        addrs = await dns.resolve4(host);
+    } catch {
+        try { addrs = await dns.resolve6(host); } catch { /* biarin axios yg nentuin gagal/nggaknya */ }
+    }
+    for (const addr of addrs) {
+        if (isPrivateIp(addr)) {
+            throw new Error('Domain resolve ke private/internal IP (diblokir, anti-SSRF)');
+        }
+    }
+    return u;
+}
+
+module.exports = {
+    getClientIp,
+    applyCors,
+    requireApiKey,
+    rateLimit,
+    isPrivateIp,
+    assertPublicUrl,
+};
