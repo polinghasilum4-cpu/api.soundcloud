@@ -15,19 +15,21 @@
  *   "api/v2/savefrom.js": { "memory": 1024, "maxDuration": 60 }
  */
 
-const { securityCheck } = require("../_security");
-
 const puppeteer = require('puppeteer-core');
 const chromium = require('@sparticuz/chromium');
 
+const { applyCors, requireApiKey, rateLimit, assertPublicUrl } = require('../_lib/security');
 const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 module.exports = async (req, res) => {
-  if (securityCheck(req, res)) return;
+  applyCors(req, res, { methods: 'POST, OPTIONS' });
 
     if (req.method === 'OPTIONS') return res.status(200).end();
+  if (!rateLimit(req, res)) return;
+  if (!requireApiKey(req, res)) return;
+
     if (req.method !== 'POST') {
         return res.status(405).json({ success: false, error: 'Method not allowed' });
     }
@@ -40,6 +42,12 @@ module.exports = async (req, res) => {
 
     if (!url || !/^https?:\/\//.test(url)) {
         return res.status(400).json({ success: false, error: 'URL tidak valid' });
+    }
+
+    try {
+        await assertPublicUrl(url);
+    } catch (e) {
+        return res.status(403).json({ success: false, error: e.message });
     }
 
     console.log('[savefrom] request:', url);

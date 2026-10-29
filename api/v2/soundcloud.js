@@ -1,12 +1,16 @@
-const { securityCheck } = require("../_security");
-
 const axios = require("axios");
 
+const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 module.exports = async (req, res) => {
-  if (securityCheck(req, res)) return;
-
   // CORS Headers
-  
+  applyCors(req, res, { methods: 'GET, POST, OPTIONS' });
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+  if (!rateLimit(req, res)) return;
+  if (!requireApiKey(req, res)) return;
+
 
   const scUrl = req.query.url || req.body?.url;
 

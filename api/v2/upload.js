@@ -7,13 +7,13 @@
  *   - time : 1h / 12h / 24h / 72h (default 24h)
  */
 
-const { securityCheck } = require("../_security");
-
 const axios = require('axios');
 const FormData = require('form-data');
 const { formidable } = require('formidable');
 const fs = require('fs');
+const crypto = require('crypto');
 
+const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 module.exports.config = {
     api: { bodyParser: false, sizeLimit: '50mb' },
     maxDuration: 30,
@@ -22,10 +22,45 @@ module.exports.config = {
 const LITTERBOX = 'https://litterbox.catbox.moe/resources/internals/api.php';
 const VALID_TIMES = ['1h', '12h', '24h', '72h'];
 
+// ---------------------------------------------------------------------
+// Magic-byte allowlist (Anti-RCE): client-supplied mimetype gampang
+// dipalsu, jadi kita sniff byte pertama file dan cocokkan ke whitelist
+// tipe yang aman buat di-relay. Executable/script (.exe, .sh, .php,
+// .html, dll) otomatis ketolak karena gak ada di daftar ini.
+// ---------------------------------------------------------------------
+const MAGIC_BYTES = [
+    { ext: 'jpg', mime: 'image/jpeg', sig: [0xff, 0xd8, 0xff] },
+    { ext: 'png', mime: 'image/png', sig: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+    { ext: 'gif', mime: 'image/gif', sig: [0x47, 0x49, 0x46, 0x38] },
+    { ext: 'webp', mime: 'image/webp', sig: [0x52, 0x49, 0x46, 0x46], offset: 0, skipCheck: (b) => b.slice(8, 12).toString('ascii') === 'WEBP' },
+    { ext: 'pdf', mime: 'application/pdf', sig: [0x25, 0x50, 0x44, 0x46] },
+    { ext: 'mp3', mime: 'audio/mpeg', sig: [0x49, 0x44, 0x33] }, // ID3
+    { ext: 'mp3', mime: 'audio/mpeg', sig: [0xff, 0xfb] },
+    { ext: 'ogg', mime: 'audio/ogg', sig: [0x4f, 0x67, 0x67, 0x53] },
+    { ext: 'wav', mime: 'audio/wav', sig: [0x52, 0x49, 0x46, 0x46], skipCheck: (b) => b.slice(8, 12).toString('ascii') === 'WAVE' },
+    { ext: 'mp4', mime: 'video/mp4', sig: [0x66, 0x74, 0x79, 0x70], offset: 4 },
+    { ext: 'zip', mime: 'application/zip', sig: [0x50, 0x4b, 0x03, 0x04] },
+];
+
+function detectFileType(buffer) {
+    for (const t of MAGIC_BYTES) {
+        const off = t.offset || 0;
+        const slice = buffer.slice(off, off + t.sig.length);
+        const matches = t.sig.every((b, i) => slice[i] === b);
+        if (matches && (!t.skipCheck || t.skipCheck(buffer))) {
+            return { ext: t.ext, mime: t.mime };
+        }
+    }
+    return null;
+}
+
 module.exports = async function handler(req, res) {
-    res.setHeader('Access-Control-Max-Age', '86400');
+  applyCors(req, res, { methods: 'POST, OPTIONS' });
 
     if (req.method === 'OPTIONS') return res.status(204).end();
+  if (!rateLimit(req, res)) return;
+  if (!requireApiKey(req, res)) return;
+
 
     // GET = info
     if (req.method === 'GET') {
@@ -79,17 +114,35 @@ module.exports = async function handler(req, res) {
         }
 
         const buffer = fs.readFileSync(file.filepath);
-        const filename = file.originalFilename || 'file';
-        const mimetype = file.mimetype || 'application/octet-stream';
 
-        console.log(`[upload] ${filename} (${(buffer.length / 1024).toFixed(1)} KB) time=${time}`);
+        // ============ MAGIC-BYTE VALIDATION (Anti-RCE) ============
+        // Jangan percaya file.mimetype (header Content-Type dari client,
+        // gampang dipalsu) — sniff isi file beneran.
+        const detected = detectFileType(buffer);
+        if (!detected) {
+            return res.status(415).json({
+                success: false,
+                error: 'Tipe file tidak didukung/tidak dikenali. Hanya gambar, audio, video, pdf, zip.',
+            });
+        }
+
+        // ============ SAFE FILENAME (UUID rename) ============
+        // Nama asli dari client gak dipakai buat apapun selain display di
+        // response — nama yang di-forward ke storage pihak ketiga selalu
+        // UUID + ekstensi hasil deteksi magic-byte, biar gak ada celah
+        // path traversal / header injection / nama file berbahaya.
+        const safeFilename = `${crypto.randomUUID()}.${detected.ext}`;
+        const originalFilename = String(file.originalFilename || 'file').slice(0, 200);
+        const mimetype = detected.mime;
+
+        console.log(`[upload] ${safeFilename} (orig: ${originalFilename}, ${(buffer.length / 1024).toFixed(1)} KB) time=${time}`);
 
         // Forward ke Litterbox
         const lb = new FormData();
         lb.append('reqtype', 'fileupload');
         lb.append('time', time);
         lb.append('fileToUpload', buffer, {
-            filename,
+            filename: safeFilename,
             contentType: mimetype,
         });
 
@@ -117,7 +170,8 @@ module.exports = async function handler(req, res) {
             success: true,
             data: {
                 url,
-                filename,
+                filename: safeFilename,
+                originalFilename,
                 size: buffer.length,
                 mimetype,
                 time,

@@ -8,13 +8,12 @@
  *   - voice_id  : voice ID dari list (default: en-US-natalie)
  */
 
-const { securityCheck } = require("../_security");
-
 const axios = require('axios');
 const FormData = require('form-data');
 const { formidable } = require('formidable');
 const fs = require('fs');
 
+const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 module.exports.config = {
     api: { bodyParser: false, sizeLimit: '25mb' },
     maxDuration: 60,
@@ -32,8 +31,11 @@ const VALID_VOICES = [
 ];
 
 module.exports = async function handler(req, res) {
-    res.setHeader('Access-Control-Max-Age', '86400');
+  applyCors(req, res, { methods: 'POST, OPTIONS' });
     if (req.method === 'OPTIONS') return res.status(204).end();
+  if (!rateLimit(req, res)) return;
+  if (!requireApiKey(req, res)) return;
+
 
     if (req.method === 'GET') {
         return res.json({

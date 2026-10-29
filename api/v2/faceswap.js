@@ -2,14 +2,13 @@
  * Face Swap API — Remaker.ai
  */
 
-const { securityCheck } = require("../_security");
-
 const axios = require('axios');
 const FormData = require('form-data');
 const { Readable } = require('stream');
 const { formidable } = require('formidable');
 const fs = require('fs');
 
+const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 module.exports.config = {
     api: {
         bodyParser: false,
@@ -229,9 +228,12 @@ async function fetchAsBuffer(url) {
 //  HANDLER UTAMA
 // ============================================================
 module.exports = async function handler(req, res) {
-    res.setHeader('Access-Control-Max-Age', '86400');
+  applyCors(req, res, { methods: 'GET, POST, OPTIONS' });
 
     if (req.method === 'OPTIONS') return res.status(204).end();
+  if (!rateLimit(req, res)) return;
+  if (!requireApiKey(req, res)) return;
+
 
     if (req.method !== 'POST') {
         return res.status(405).json({

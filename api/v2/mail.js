@@ -15,10 +15,9 @@
  *   { success: true, data: {...} }
  */
 
-const { securityCheck } = require("../_security");
-
 const axios = require('axios');
 
+const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 const MAILTM_API = 'https://api.mail.tm';
 
 // Vercel config
@@ -278,11 +277,14 @@ async function actionDelete(token, id) {
 // ============================================================
 module.exports = async function handler(req, res) {
     // CORS
-    res.setHeader('Access-Control-Max-Age', '86400');
+  applyCors(req, res, { methods: 'GET, POST, OPTIONS' });
 
     if (req.method === 'OPTIONS') {
         return res.status(204).end();
     }
+  if (!rateLimit(req, res)) return;
+  if (!requireApiKey(req, res)) return;
+
 
     // GET → info endpoint
     if (req.method === 'GET') {
