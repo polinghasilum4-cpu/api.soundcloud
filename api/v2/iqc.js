@@ -1,4 +1,3 @@
-const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 /* ============================================================
    api/v2/iqc.js — Fake Quote iOS proxy
    Endpoint: GET /api/v2/iqc?text=<QUOTE_TEXT>
@@ -8,12 +7,12 @@ const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 const IZUKA_API = 'https://my.izuka-api.xyz/api/canvas/iqc';
 
 module.exports = async (req, res) => {
+  if (!require("../../lib/origin-guard")(req, res)) return;
   // CORS
-  applyCors(req, res, { methods: 'GET, POST, OPTIONS' });
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
   if (req.method === 'OPTIONS') return res.status(204).end();
-  if (!rateLimit(req, res)) return;
-  if (!requireApiKey(req, res)) return;
-
 
   const text = (req.query.text || '').trim();
   if (!text) {

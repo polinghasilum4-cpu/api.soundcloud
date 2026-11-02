@@ -8,7 +8,6 @@ const { Readable } = require('stream');
 const { formidable } = require('formidable');
 const fs = require('fs');
 
-const { applyCors, requireApiKey, rateLimit } = require('../_lib/security');
 module.exports.config = {
     api: {
         bodyParser: false,
@@ -228,12 +227,13 @@ async function fetchAsBuffer(url) {
 //  HANDLER UTAMA
 // ============================================================
 module.exports = async function handler(req, res) {
-  applyCors(req, res, { methods: 'GET, POST, OPTIONS' });
+  if (!require("../../lib/origin-guard")(req, res)) return;
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Max-Age', '86400');
 
     if (req.method === 'OPTIONS') return res.status(204).end();
-  if (!rateLimit(req, res)) return;
-  if (!requireApiKey(req, res)) return;
-
 
     if (req.method !== 'POST') {
         return res.status(405).json({
