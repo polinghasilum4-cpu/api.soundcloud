@@ -277,7 +277,7 @@ async function actionDelete(token, id) {
 module.exports = async function handler(req, res) {
   if (!require("../../lib/origin-guard")(req, res)) return;
     // CORS
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Origin', 'https://xs0cietylabsz.biz.id');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     res.setHeader('Access-Control-Max-Age', '86400');

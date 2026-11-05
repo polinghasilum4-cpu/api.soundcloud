@@ -22,9 +22,9 @@ const VALID_TIMES = ['1h', '12h', '24h', '72h'];
 
 module.exports = async function handler(req, res) {
   if (!require("../../lib/origin-guard")(req, res)) return;
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Origin', 'https://xs0cietylabsz.biz.id');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Filename, X-Requested-With');
     res.setHeader('Access-Control-Max-Age', '86400');
 
     if (req.method === 'OPTIONS') return res.status(204).end();

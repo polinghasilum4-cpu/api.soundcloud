@@ -24,7 +24,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 module.exports = async (req, res) => {
   if (!require("../../lib/origin-guard")(req, res)) return;
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Origin', 'https://xs0cietylabsz.biz.id');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
